@@ -1,0 +1,41 @@
+Importer Log Report
+Document: C:\conestoga\Capstone\Capstone\Hardware\EEPROM\Cap_EEPROM\Custom.pretty
+    Section : Analyze Document from - C:\conestoga\Capstone\Capstone\Hardware\EEPROM\Cap_EEPROM\Custom.pretty
+        Warning: Unknown child generator_version of footprint.
+        Warning: Unknown child uuid of property.
+        Warning: Unknown child stroke of fp_line.
+        Warning: Unknown child uuid of fp_line.
+        Warning: Unknown child stroke of fp_line.
+        Warning: Unknown child uuid of fp_line.
+        Warning: Unknown child stroke of fp_line.
+        Warning: Unknown child uuid of fp_line.
+        Warning: Unknown child stroke of fp_line.
+        Warning: Unknown child uuid of fp_line.
+        Warning: Unknown child stroke of fp_line.
+        Warning: Unknown child uuid of fp_line.
+        Warning: Unknown child stroke of fp_line.
+        Warning: Unknown child uuid of fp_line.
+        Warning: Unknown child stroke of fp_line.
+        Warning: Unknown child uuid of fp_line.
+        Warning: Unknown child stroke of fp_line.
+        Warning: Unknown child uuid of fp_line.
+        Warning: Unknown child stroke of fp_line.
+        Warning: Unknown child uuid of fp_line.
+        Warning: Unknown child stroke of fp_line.
+        Warning: Unknown child uuid of fp_line.
+        Warning: Unknown child stroke of fp_line.
+        Warning: Unknown child uuid of fp_line.
+        Warning: Unknown child stroke of fp_line.
+        Warning: Unknown child uuid of fp_line.
+        Warning: Unknown child uuid of pad.
+        Warning: Unknown child uuid of pad.
+        Warning: Unknown child uuid of pad.
+        Warning: Unknown child uuid of pad.
+        Warning: Unknown child uuid of pad.
+        Warning: Unknown child uuid of pad.
+        Warning: Unknown child embedded_fonts of footprint.
+    EndSection
+    Section : Import Document - C:\conestoga\Capstone\Capstone\Hardware\EEPROM\Cap_EEPROM\Imported Cap_EEPROM\Custom.PcbLib
+        Section : Component REF** importing.
+        EndSection
+    EndSection

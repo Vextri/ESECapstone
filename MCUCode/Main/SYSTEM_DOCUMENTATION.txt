@@ -1,0 +1,279 @@
+================================================================================
+                    PILL DISPENSER SYSTEM - FEATURE DOCUMENTATION
+================================================================================
+Date: March 26, 2026
+Platform: Raspberry Pi Pico 2 (ARM Cortex-M33)
+SDK: Pico SDK 2.2.0
+Build System: CMake + Ninja
+
+================================================================================
+                                SYSTEM OVERVIEW
+================================================================================
+
+This is a prototype automated pill dispensing system with multi-medication 
+profile management, motor control, and sensor-based feedback for accurate 
+pill dispensing operations.
+
+Key Components:
+- Raspberry Pi Pico 2 microcontroller
+- PWM-controlled motor with direction control
+- Three-sensor interrupt system (Piezo, Hall Effect, IR)
+- USB serial interface for control and debugging
+- Multi-profile medication management
+
+================================================================================
+                                MOTOR CONTROL SYSTEM
+================================================================================
+
+Hardware Configuration:
+- PWM Output: GPIO 0 (speed control)
+- Direction Control: GPIO 1 (DIR_PIN1), GPIO 2 (DIR_PIN2)
+- PWM Resolution: 4 steps (0-3) for fine motor control
+- Motor Speed: Configurable via MOTOR_SPEED constant
+
+Motor Operations:
+✓ FORWARD:  DIR_PIN1=HIGH, DIR_PIN2=LOW, PWM=ON
+✓ BACKWARD: DIR_PIN1=LOW, DIR_PIN2=HIGH, PWM=ON  
+✓ STOP:     Both pins LOW, PWM=OFF
+
+Available Functions:
+- motor_init() - Initialize PWM and GPIO
+- motor_forward() - Rotate motor forward
+- motor_backward() - Rotate motor backward
+- motor_stop() - Stop motor immediately
+- motor_set_direction(direction) - Set direction via enum
+
+Manual Control Commands:
+- 'W' key: Manual motor forward
+- 'X' key: Manual motor stop
+
+================================================================================
+                            SENSOR INTERRUPT SYSTEM
+================================================================================
+
+Three-Sensor Architecture:
+1. PIEZO SENSOR (GPIO 5)
+   - Detects pill drops/vibrations
+   - Voltage: 1V rest → 3.3V active (voltage divider protected)
+   - Edge Detection: Both rising and falling
+   - Debounce: 50ms
+   - Purpose: Pill drop detection
+
+2. HALL EFFECT SENSOR (GPIO 6)  
+   - Detects motor position via magnetic field
+   - Voltage: 3.3V active (voltage divider protected)
+   - Edge Detection: Both rising and falling
+   - Debounce: 100ms
+   - Purpose: Motor position tracking
+
+3. IR SENSOR (GPIO 7)
+   - Detects beam break/restore events
+   - Logic: Active low (beam broken = LOW)
+   - Edge Detection: Both rising and falling
+   - Debounce: 50ms
+   - Purpose: Pill passage detection
+
+Interrupt System Features:
+✓ Unified GPIO interrupt handler (fixes SDK callback limitation)
+✓ Individual sensor enable/disable control
+✓ Hardware debouncing with configurable timing
+✓ Detailed debug output with timing information
+✓ Callback system for user-defined responses
+
+Sensor Control Commands:
+- 'P': Toggle piezo sensor on/off
+- 'H': Toggle hall effect sensor on/off
+- 'I': Toggle IR sensor on/off
+- 'R': Reset all sensor counters
+- 'T': Display sensor status and counts
+
+================================================================================
+                          PILL DISPENSER PROFILES
+================================================================================
+
+Multi-Medication Management:
+- 5 medication slots (profiles 0-4)
+- Each profile stores: name, pills per dose, total pills
+- Persistent state management
+- Real-time profile switching
+
+Default Profiles:
+- Profile 1: "Vitamin D" (1 pill per dose, 30 total)
+- Profile 2: "Aspirin" (2 pills per dose, 20 total)
+- Profiles 3-5: Available for configuration
+
+Profile Operations:
+✓ Switch between medication types
+✓ Track pills dispensed per profile
+✓ Monitor remaining pills
+✓ Dose counting and management
+
+Profile Control Commands:
+- '1': Switch to profile 1 (Vitamin D)
+- '2': Switch to profile 2 (Aspirin)  
+- 'L': List all available profiles
+- 'S': Show current profile status
+- 'D': Dispense dose from current profile
+
+================================================================================
+                            DEBUGGING & DIAGNOSTICS
+================================================================================
+
+GPIO Monitoring:
+- 'G': One-time GPIO state test for all sensor pins
+- 'V': Continuous real-time monitoring of all sensor GPIOs
+- 'C': Complete interrupt configuration diagnosis
+
+Debug Features:
+✓ Real-time GPIO state monitoring (5Hz update rate)
+✓ Interrupt configuration validation
+✓ Pull resistor status reporting
+✓ Voltage level verification
+✓ Sensor enable/disable status
+✓ Timing information for all events
+
+Diagnostic Commands:
+- 'C': Debug interrupt configuration
+- 'G': Test GPIO states
+- 'V': Monitor all sensor GPIOs continuously
+- 'T': Show sensor status
+
+================================================================================
+                                USER INTERFACE
+================================================================================
+
+Communication: USB Serial (stdio over USB)
+Interface: Command-based keyboard input
+Response: Real-time text output with detailed status
+
+Available Commands:
+DISPENSING:
+  D - Dispense dose from current profile
+  S - Show current status
+  L - List all medication profiles
+  
+PROFILES:  
+  1 - Switch to profile 1 (Vitamin D)
+  2 - Switch to profile 2 (Aspirin)
+  
+SENSORS:
+  P - Toggle piezo sensor
+  H - Toggle hall effect sensor  
+  I - Toggle IR sensor
+  R - Reset sensor counts
+  T - Show sensor status
+  
+DIAGNOSTICS:
+  G - Test GPIO states
+  V - Monitor all sensor GPIOs continuously
+  C - Debug interrupt configuration
+  
+MOTOR:
+  W - Manual motor forward
+  X - Manual motor stop
+  
+SYSTEM:
+  Q - Quit/shutdown
+
+================================================================================
+                            HARDWARE SPECIFICATIONS
+================================================================================
+
+Power Requirements:
+- Microcontroller: 3.3V logic
+- Sensors: 3.3V (voltage dividers used for 5V sensors)
+- Motor: PWM controlled (voltage depends on motor specs)
+
+Pin Assignments:
+- GPIO 0: PWM Motor Speed Control
+- GPIO 1: Motor Direction Pin 1
+- GPIO 2: Motor Direction Pin 2
+- GPIO 5: Piezo Sensor Input
+- GPIO 6: Hall Effect Sensor Input  
+- GPIO 7: IR Sensor Input
+
+Safety Features:
+✓ Voltage dividers protect 3.3V GPIOs from 5V sensors
+✓ Hardware debouncing prevents false triggering
+✓ Motor stop functionality for emergency situations
+✓ Sensor enable/disable for safe testing
+
+================================================================================
+                              CURRENT SYSTEM STATE
+================================================================================
+
+BUILD STATUS: ✓ Successfully compiling and flashing
+MOTOR CONTROL: ✓ Fully operational with PWM and direction control
+SENSOR SYSTEM: ✓ All three sensors operational with unified interrupt handler
+VOLTAGE PROTECTION: ✓ Implemented for piezo and hall effect sensors
+INTERRUPT ROUTING: ✓ Fixed SDK callback limitation with unified handler
+USB COMMUNICATION: ✓ Stable serial interface
+PROFILE MANAGEMENT: ✓ Multi-medication system operational
+
+RECENT FIXES:
+- Fixed GPIO interrupt callback registration (unified handler)
+- Added voltage dividers for sensor protection  
+- Enhanced debugging capabilities
+- Improved real-time GPIO monitoring
+- Added comprehensive interrupt diagnostics
+
+TESTED FEATURES:
+✓ Motor forward/backward/stop control
+✓ Sensor interrupt triggering (all three sensors)
+✓ Profile switching and management
+✓ GPIO state monitoring
+✓ Interrupt configuration debugging
+✓ USB serial communication
+
+================================================================================
+                                USAGE WORKFLOW
+================================================================================
+
+1. STARTUP:
+   - Connect Pico via USB
+   - Open serial terminal
+   - System displays boot message and command menu
+
+2. BASIC OPERATION:
+   - Press '1' or '2' to select medication profile
+   - Press 'S' to check status
+   - Press 'D' to dispense a dose
+
+3. SENSOR TESTING:
+   - Press 'P', 'H', 'I' to enable sensors
+   - Press 'V' to monitor GPIO states in real-time
+   - Trigger sensors and watch for interrupt messages
+
+4. DEBUGGING:
+   - Press 'C' for complete system diagnostics
+   - Press 'G' for GPIO state snapshot
+   - Press 'T' for sensor status
+
+5. MOTOR TESTING:
+   - Press 'W' for manual forward control
+   - Press 'X' to stop motor
+
+================================================================================
+                                FUTURE ENHANCEMENTS
+================================================================================
+
+Potential Improvements:
+- [ ] Variable motor speed control
+- [ ] Automatic pill counting via sensor feedback
+- [ ] Scheduled dispensing with RTC
+- [ ] WiFi connectivity for remote monitoring
+- [ ] LCD display for local status
+- [ ] Audio feedback for dispensing operations
+- [ ] Profile configuration via serial commands
+- [ ] Data logging and usage statistics
+
+Technical Optimizations:
+- [ ] Adaptive debouncing based on sensor characteristics
+- [ ] Motor position feedback with hall effect sensor
+- [ ] Automatic calibration routines
+- [ ] Error recovery mechanisms
+- [ ] Watchdog timer implementation
+
+================================================================================
+                                    END
+================================================================================
