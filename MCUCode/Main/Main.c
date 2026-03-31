@@ -9,6 +9,8 @@
 // Commands: D=dispense, S=status, B=button sim, L=load profile, W/X=manual motor, Q=quit
 
 #include "pico/stdlib.h"
+#include "pico/stdio.h"
+#include "pico/error.h"
 #include "motor_control.h"
 #include "pill_dispenser.h"
 #include "sensor_interrupts.h"
@@ -21,8 +23,8 @@ void on_piezo_detected(void) {
 }
 
 void on_hall_effect_detected(void) {
-    printf(">>> MOTOR POSITION DETECTED! (Hall Effect) <<<\n");
-    // Could add motor position tracking logic here
+    printf(">>> HALL EFFECT: HIGH->LOW detected, stopping motor <<<\n");
+    motor_stop();
 }
 
 void on_ir_detected(void) {
@@ -59,7 +61,8 @@ int main() {
     
     printf("\n=== PILL DISPENSER PROTOTYPE ===\n");
     printf("Commands:\n");
-    printf("D - Dispense dose\n");
+    printf("D - Dispense dose (timed)\n");
+    printf("F - Dispense dose (sensor feedback)\n");
     printf("S - Show status\n");
     printf("L - List all profiles\n");
     printf("B - Simulate button press\n");
@@ -91,6 +94,11 @@ int main() {
                 case 'd':
                 case 'D':
                     dispenser_execute_dose();
+                    break;
+                    
+                case 'f':
+                case 'F':
+                    dispenser_execute_dose_sensor_based();
                     break;
                     
                 case 's':
