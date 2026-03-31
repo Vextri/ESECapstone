@@ -12,11 +12,10 @@
 #include "hardware/pwm.h"
 #include "hardware/gpio.h"
 
-// Pin definitions
-#define PWM_PIN 0
-#define DIR_PIN1 1
-#define DIR_PIN2 2
-#define MOTOR_SPEED 3  // PWM duty cycle (0-3)
+// Pin definitions (DRV8833: AIN1=GPIO1, AIN2=GPIO2, no separate enable pin)
+#define AIN1_PIN 1   // DRV8833 AIN1 - PWM for forward
+#define AIN2_PIN 2   // DRV8833 AIN2 - PWM for backward
+#define MOTOR_SPEED 800  // PWM duty cycle (0-999), 750 = 75%
 
 // Motor direction states
 typedef enum {
@@ -25,8 +24,9 @@ typedef enum {
     MOTOR_BACKWARD
 } motor_direction_t;
 
-// Global variables
-extern uint motor_slice_num;
+// Global variables (two slices: AIN1=slice0 chanB, AIN2=slice1 chanA)
+extern uint motor_slice_ain1;
+extern uint motor_slice_ain2;
 
 /**
  * Initialize motor control system
