@@ -83,6 +83,7 @@ int main() {
     printf("C - Debug interrupt configuration\n");
     printf("--- Manual Motor Control ---\n");
     printf("W - Motor forward\n");
+    printf("N - Motor backward\n");
     printf("X - Motor stop\n");
     printf("--- Stepper Motor Control ---\n");
     printf("A - Stepper forward (continuous)\n");
@@ -204,6 +205,12 @@ int main() {
                     motor_forward();
                     break;
                     
+                case 'n':
+                case 'N':
+                    printf("Manual motor backward\n");
+                    motor_backward();
+                    break;
+
                 case 'x':
                 case 'X':
                     printf("Manual motor stop\n");

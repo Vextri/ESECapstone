@@ -199,9 +199,10 @@ bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms) {
         while (true) {
             uint32_t now = to_ms_since_boot(get_absolute_time());
             if (now - start_time > timeout_ms) {
-                printf("TIMEOUT: Piezo did not trigger within %dms\n", timeout_ms);
+                printf("TIMEOUT: Piezo did not trigger within %dms (attempt %d/%d)\n",
+                       timeout_ms, attempt, MAX_RETRIES);
                 motor_stop();
-                return false;  // Hardware problem - abort entirely, do not retry
+                break;  // Treat as failed attempt, retry up to MAX_RETRIES
             }
 
             if (piezo_get_count() > 0) {

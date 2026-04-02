@@ -1,0 +1,357 @@
+================================================================================
+  PILL DISPENSER - SENSOR & DISPENSING TEST PLAN
+  Project: Conestoga Capstone - Pill Dispenser (RP2040)
+  Date: April 2, 2026
+================================================================================
+
+OVERVIEW
+--------
+This document covers manual test procedures for:
+  1. Piezo Sensor (GPIO 5)
+  2. IR Sensor (GPIO 7)
+  3. Hall Effect Sensor (GPIO 6)
+  4. F Command - Sensor-Based Dose Dispensing (dispenser_execute_dose_sensor_based)
+
+All tests are performed over USB serial (115200 baud).
+Use keyboard commands to interact with the system.
+Monitoring commands: T (sensor status), G (raw GPIO states), V (continuous monitor)
+
+================================================================================
+SECTION 1 - PIEZO SENSOR TESTS (GPIO 5)
+================================================================================
+
+--- TEST P-01: Piezo Enable/Disable ---
+Precondition: System powered, serial connected.
+Steps:
+  1. Send 'T' - confirm piezo shows DISABLED, count = 0
+  2. Send 'P' - enables piezo
+  3. Send 'T' - confirm piezo shows ENABLED
+  4. Tap piezo with finger
+  5. Send 'T' - confirm count incremented
+  6. Send 'P' - disables piezo
+  7. Send 'T' - confirm piezo shows DISABLED
+Pass: Count increments only while enabled.
+Fail: Count changes while disabled, or toggle does not respond.
+
+--- TEST P-02: Piezo Interrupt Fires on Impact ---
+Precondition: Piezo enabled (send 'P' if needed).
+Steps:
+  1. Send 'R' to reset all counts
+  2. Send 'T' - confirm count = 0
+  3. Drop a small object onto the piezo disc from ~2cm
+  4. Observe serial output for: ">>> PIEZO INTERRUPT! Edge: ..."
+  5. Send 'T' - confirm count >= 1
+Pass: Serial prints interrupt message, count increments.
+Fail: No serial print, count remains 0.
+
+--- TEST P-03: Piezo Debounce ---
+Precondition: Piezo enabled, count reset.
+Steps:
+  1. Send 'R' to reset counts
+  2. Tap piezo rapidly 5 times within 50ms (vibration simulation)
+  3. Send 'T' - check count
+Pass: Count is 1 or 2 (debounce filtered extra triggers, PIEZO_DEBOUNCE_MS = 100ms).
+Fail: Count equals 5 or more (debounce not working).
+
+--- TEST P-04: Piezo Continuity at Rest ---
+Precondition: Piezo enabled, no physical disturbance.
+Steps:
+  1. Send 'R' to reset counts
+  2. Wait 30 seconds without touching anything
+  3. Send 'T' - check count
+Pass: Count remains 0 (no false triggers from vibration/EMI at rest).
+Fail: Count incremented without external impact.
+
+================================================================================
+SECTION 2 - IR SENSOR TESTS (GPIO 7)
+================================================================================
+
+--- TEST I-01: IR Enable/Disable ---
+Precondition: System powered, serial connected.
+Steps:
+  1. Send 'T' - confirm IR shows DISABLED
+  2. Send 'I' - enables IR
+  3. Send 'T' - confirm IR shows ENABLED
+  4. Break the IR beam with a finger
+  5. Send 'T' - confirm count incremented
+  6. Send 'I' - disables IR
+  7. Send 'T' - confirm IR shows DISABLED
+Pass: Count increments only while enabled.
+Fail: Count changes while disabled.
+
+--- TEST I-02: IR Beam Break Detection ---
+Precondition: IR enabled (send 'I' if needed), count reset.
+Steps:
+  1. Send 'R' to reset counts
+  2. Send 'V' to enter continuous GPIO monitor
+  3. Pass a small object through the IR beam path
+  4. Observe raw GPIO value changes on GPIO 7
+  5. Press any key to exit monitor
+  6. Observe serial: "IR SENSOR: Beam BROKEN!"
+  7. Send 'T' - confirm count >= 1
+Pass: GPIO 7 changes state, serial confirms beam broken, count increments.
+Fail: No GPIO change, no serial message, count stays 0.
+
+--- TEST I-03: IR Beam Restore Detection ---
+Precondition: IR enabled.
+Steps:
+  1. Send 'R' to reset counts
+  2. Block the IR beam with a finger (hold in beam)
+  3. Wait 1 second
+  4. Remove finger from beam
+  5. Observe serial: "IR SENSOR: Beam RESTORED!"
+Pass: Both BROKEN and RESTORED events printed, count = 2 (both edges).
+Fail: Only one event printed or no events.
+
+--- TEST I-04: IR Debounce ---
+Precondition: IR enabled, count reset.
+Steps:
+  1. Send 'R' to reset counts
+  2. Wave a toothpick through the beam very rapidly (break/restore < 50ms)
+  3. Send 'T' - check count
+Pass: Count is 1 (IR_DEBOUNCE_MS = 50ms filtered extra events).
+Fail: Count is 3 or more.
+
+--- TEST I-05: IR False Trigger at Rest ---
+Precondition: IR enabled, beam clear (unobstructed).
+Steps:
+  1. Send 'R' to reset counts
+  2. Wait 60 seconds, no disturbance to IR path
+  3. Send 'T' - check count
+Pass: Count remains 0.
+Fail: Count > 0 without beam break (ambient light, noise issue).
+
+================================================================================
+SECTION 3 - HALL EFFECT SENSOR TESTS (GPIO 6)
+================================================================================
+
+--- TEST H-01: Hall Effect Enable/Disable ---
+Precondition: System powered, serial connected.
+Steps:
+  1. Send 'T' - confirm hall shows DISABLED
+  2. Send 'H' - enables hall effect
+  3. Send 'T' - confirm hall shows ENABLED
+  4. Pass a magnet near the sensor
+  5. Send 'T' - confirm count incremented
+  6. Send 'H' - disables hall effect
+  7. Send 'T' - confirm DISABLED
+Pass: Count increments only while enabled.
+Fail: Count changes while disabled.
+
+--- TEST H-02: Hall Effect Trigger on Falling Edge ---
+Precondition: Hall effect enabled, count reset.
+Steps:
+  1. Send 'R' to reset counts
+  2. Approach sensor slowly with a small magnet
+  3. Observe serial: "HALL EFFECT: FALLING edge (HIGH->LOW), Count: 1"
+  4. Remove magnet
+  5. Send 'T' - check count
+Pass: Count = 1 on approach (detects falling edge only, HALL_DEBOUNCE_MS = 10ms).
+Fail: Count > 1, or no trigger.
+
+--- TEST H-03: Hall Effect Does Not Trigger Without Magnet ---
+Precondition: Hall effect enabled, no magnet nearby.
+Steps:
+  1. Send 'R' to reset counts
+  2. Wait 30 seconds
+  3. Send 'T' - check count
+Pass: Count = 0.
+Fail: Count > 0 (false trigger from EMI or incorrect wiring).
+
+================================================================================
+SECTION 4 - RESET & STATUS UTILITY TESTS
+================================================================================
+
+--- TEST U-01: Reset All Sensor Counts ---
+Precondition: At least one sensor has a non-zero count.
+Steps:
+  1. Trigger each sensor manually (piezo tap, IR break, Hall magnet)
+  2. Send 'T' - confirm all counts > 0
+  3. Send 'R' (reset all)
+  4. Send 'T' - confirm all counts = 0
+Pass: All counts return to 0 after reset.
+Fail: Any count remains non-zero.
+
+--- TEST U-02: GPIO State Monitor (G Command) ---
+Steps:
+  1. Send 'G' - observe raw GPIO logic levels for GPIO 5, 6, 7
+  2. Manually break IR beam
+  3. Send 'G' again - confirm GPIO 7 changed state
+Pass: GPIO states reflect physical sensor conditions.
+Fail: State unchanging regardless of sensor input.
+
+--- TEST U-03: Continuous Monitor (V Command) ---
+Steps:
+  1. Send 'V' to enter continuous monitor
+  2. Trigger each sensor in turn
+  3. Observe changes printed in real time
+  4. Press any key to exit
+Pass: Monitor updates in real time, exits cleanly on keypress.
+Fail: Monitor does not exit, or sensors not reflected.
+
+================================================================================
+SECTION 5 - F COMMAND: SENSOR-BASED DOSE DISPENSING
+================================================================================
+
+--- TEST F-01: No Active Profile Selected ---
+Precondition: No profile loaded (fresh boot, or no '1'/'2' command sent).
+Steps:
+  1. Send 'F'
+Expected Output: "ERROR: No active dispense profile selected!"
+Pass: Error printed, motor does not run.
+Fail: Motor runs with no profile loaded.
+
+--- TEST F-02: Insufficient Pills ---
+Precondition: Profile loaded with 1 pill remaining, pills_per_dose = 2.
+  (Manually deplete via repeated F commands until 1 pill left, or adjust profile.)
+Steps:
+  1. Send 'F'
+Expected Output: "ERROR: Insufficient pills remaining (2 needed, X available)"
+Pass: Error printed, motor does not run.
+Fail: Motor attempts dispense with insufficient pills.
+
+--- TEST F-03: Normal Single Pill Dispense - Both Sensors Trigger ---
+Precondition:
+  - Profile loaded and selected (send '1' or '2')
+  - Piezo and IR sensors physically in position
+  - Pill loaded in dispenser
+Steps:
+  1. Send 'R' to reset sensor counts
+  2. Send 'F'
+  3. Observe motor starts spinning
+  4. Allow pill to fall naturally - piezo detects impact, IR confirms pass
+Expected Output (in order):
+  "Motor starting (attempt 1)..."
+  ">>> PIEZO INTERRUPT! ..."         <- piezo fires, motor stops
+  "Pill impact detected - motor stopped."
+  (300ms delay)
+  "IR SENSOR: Beam BROKEN!"          <- IR fires during delay window
+  "Pill check: Piezo=TRIGGERED | IR=TRIGGERED"
+  "SUCCESS: Pill confirmed dispensed!"
+  "Dose complete!"
+Pass: Both sensors confirm, pill count decrements, dose completes.
+Fail: Motor does not stop on piezo, or success printed without IR.
+
+--- TEST F-04: IR Does Not Trigger - Retry Logic ---
+Precondition: Profile loaded. Block or disconnect IR sensor so it will not fire.
+Steps:
+  1. Send 'R' to reset counts
+  2. Send 'F'
+  3. Observe retry sequence
+Expected Output:
+  Attempt 1: Piezo fires, motor stops, "WARNING: IR did not confirm pill - retrying..."
+  Attempt 2: Same
+  Attempt 3: Same
+  "ERROR: Pill failed to dispense after 3 attempts"
+Pass: Exactly 3 attempts made, error printed after 3rd failure, operation stops.
+Fail: More or fewer than 3 attempts, or system hangs.
+
+--- TEST F-05: Piezo Does Not Trigger - Timeout With Retries ---
+Precondition: Profile loaded. Block or disconnect piezo so it will not fire.
+Steps:
+  1. Send 'R' to reset counts
+  2. Send 'F'
+  3. Wait for all 3 timeout cycles (~30 seconds total)
+Expected Output:
+  "Motor starting (attempt 1)..."
+  (10 second wait)
+  "TIMEOUT: Piezo did not trigger within 10000ms (attempt 1/3)"
+  "WARNING: IR did not confirm pill - retrying..."
+  "--- Retry attempt 2/3 ---"
+  "Motor starting (attempt 2)..."
+  (10 second wait)
+  "TIMEOUT: Piezo did not trigger within 10000ms (attempt 2/3)"
+  "--- Retry attempt 3/3 ---"
+  (10 second wait)
+  "TIMEOUT: Piezo did not trigger within 10000ms (attempt 3/3)"
+  "ERROR: Pill failed to dispense after 3 attempts"
+Pass: All 3 attempts made (~30s total), motor stops each time, error printed after 3rd.
+Fail: Aborts after only 1 attempt, motor runs indefinitely, or system crashes.
+
+--- TEST F-06: Multi-Pill Dose (pills_per_dose = 2) ---
+Precondition: Profile with pills_per_dose = 2, at least 2 pills loaded.
+Steps:
+  1. Send '1' or '2' to select a profile with 2 pills per dose
+  2. Confirm with 'S' (pills_per_dose = 2)
+  3. Send 'F'
+  4. Allow both pills to dispense normally
+Expected Output:
+  "--- Dispensing pill 1/2 ---"  ... SUCCESS
+  "--- Dispensing pill 2/2 ---"  ... SUCCESS
+  "Dose complete! Pills remaining: X"
+Pass: Both pills confirmed, count decremented by 2 total.
+Fail: Only 1 pill dispensed, or count decremented incorrectly.
+
+--- TEST F-07: First Pill Succeeds, Second Pill Fails ---
+Precondition: Profile with pills_per_dose = 2.
+Steps:
+  1. Allow first pill to dispense normally
+  2. After first success, block IR so second pill cannot be confirmed
+  3. Observe second pill attempt
+Expected Output:
+  Pill 1: SUCCESS and count decremented
+  Pill 2: 3 retries, then "ERROR: Pill failed to dispense after 3 attempts"
+  "WARNING: Not all pills dispensed successfully."
+Pass: First pill count decremented, second pill fails cleanly with warning.
+Fail: Both counts decremented on failure, or system does not report partial failure.
+
+--- TEST F-08: Sensor State After Dose Completes ---
+Precondition: Normal successful dose dispensed.
+Steps:
+  1. Send 'F' and let dose complete normally
+  2. Send 'T' after completion
+Pass: Sensors remain ENABLED after dose (they are enabled at start of dispense
+      and not disabled afterwards - expected behaviour).
+Fail: Sensors are in unexpected state after dispensing.
+
+================================================================================
+SECTION 6 - TIMING & INTEGRATION TESTS
+================================================================================
+
+--- TEST T-01: 300ms IR Window Is Sufficient ---
+Precondition: Real pill in real chute, piezo and IR both in position.
+Steps:
+  1. Send 'F' and observe a real dispense
+  2. Check serial log: does IR trigger within the 300ms window?
+Pass: IR SENSOR message appears between "Pill impact detected" and "Pill check:" line.
+Note: If IR frequently misses the 300ms window in real conditions, increase
+      sleep_ms(300) in dispenser_dispense_single_pill_sensor_based() to 500ms.
+
+--- TEST T-02: Motor Stops Immediately on Piezo ---
+Precondition: Motor running during F command.
+Steps:
+  1. Trigger dispense with 'F'
+  2. Observe serial: time between PIEZO INTERRUPT and "motor stopped" message
+Pass: Motor stop message appears within 1 polling cycle (~5ms) of piezo trigger.
+Fail: Significant delay between piezo and motor stop.
+
+--- TEST T-03: Concurrent Sensor Activity During Dispense ---
+Precondition: All three sensors enabled.
+Steps:
+  1. Send 'F' to start dispense
+  2. Wave a magnet near Hall effect DURING the dispense cycle
+  3. Observe that Hall effect activity does NOT interfere with dispense logic
+Pass: Hall effect triggers are printed but dispense completes normally.
+Fail: Hall effect interrupt disrupts dispense state.
+
+================================================================================
+NOTES
+================================================================================
+
+- Debounce values: PIEZO=100ms, HALL=10ms, IR=50ms
+- Dispense retry limit: 3 attempts per pill
+- Timeout per pill: 10000ms
+- IR settle window after piezo: 300ms
+- To increase IR catch window: edit sleep_ms(300) in pill_dispenser.c
+
+If piezo triggers without a pill (false positive from motor vibration):
+  - Increase PIEZO_DEBOUNCE_MS in sensor_interrupts.h
+  - Add mechanical isolation between motor mount and piezo mount
+
+If IR gives false triggers from ambient light:
+  - Shield IR emitter/receiver pair from direct light sources
+  - Increase IR_DEBOUNCE_MS in sensor_interrupts.h
+
+================================================================================
+END OF TEST PLAN
+================================================================================
