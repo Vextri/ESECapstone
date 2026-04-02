@@ -173,10 +173,9 @@ void dispenser_test_mode(void) {
 bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms) {
     printf("Starting sensor-based pill dispense (timeout: %dms)...\n", timeout_ms);
 
-    // Ensure all three sensors are enabled
+    // Ensure piezo and IR are enabled
     if (!piezo_is_enabled()) piezo_enable();
     if (!ir_is_enabled()) ir_enable();
-    if (!hall_effect_is_enabled()) hall_effect_enable();
 
     const int MAX_RETRIES = 3;
 
@@ -186,52 +185,50 @@ bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms) {
             sleep_ms(500);
         }
 
-        // Reset all counts before each attempt so only new events count
+        // Reset counts before each attempt so only new events count
         piezo_reset_count();
         ir_reset_count();
-        hall_effect_reset_count();
 
         uint32_t start_time = to_ms_since_boot(get_absolute_time());
 
-        // Start motor - hall effect callback will stop it when disc reaches position
+        // Start motor - piezo will stop it when pill impact is detected
         printf("Motor starting (attempt %d)...\n", attempt);
         motor_forward();
 
-        // Wait for hall effect to confirm disc has rotated to position
+        // Wait for piezo to detect pill impact
         while (true) {
             uint32_t now = to_ms_since_boot(get_absolute_time());
             if (now - start_time > timeout_ms) {
-                printf("TIMEOUT: Hall effect did not trigger within %dms\n", timeout_ms);
+                printf("TIMEOUT: Piezo did not trigger within %dms\n", timeout_ms);
                 motor_stop();
                 return false;  // Hardware problem - abort entirely, do not retry
             }
 
-            if (hall_effect_get_count() > 0) {
-                motor_stop();  // Ensure stopped (callback may have already done this)
-                printf("Disc position reached - motor stopped.\n");
+            if (piezo_get_count() > 0) {
+                motor_stop();
+                printf("Pill impact detected - motor stopped.\n");
                 break;
             }
 
             sleep_ms(5);
         }
 
-        // Brief settle so piezo/IR counts register after motor stops
-        sleep_ms(100);
+        // Wait for IR interrupt to register - piezo and IR fire near-simultaneously
+        // so we need enough time for the IRQ handler to increment the count
+        sleep_ms(300);
 
-        // Check pill verification sensors
-        bool piezo_ok = piezo_get_count() > 0;
-        bool ir_ok    = ir_get_count() > 0;
+        // IR confirms pill passed through chute
+        bool ir_ok = ir_get_count() > 0;
 
-        printf("Pill check: Piezo=%s | IR=%s\n",
-               piezo_ok ? "TRIGGERED" : "NO SIGNAL",
-               ir_ok    ? "TRIGGERED" : "NO SIGNAL");
+        printf("Pill check: Piezo=TRIGGERED | IR=%s\n",
+               ir_ok ? "TRIGGERED" : "NO SIGNAL");
 
-        if (piezo_ok && ir_ok) {
+        if (ir_ok) {
             printf("SUCCESS: Pill confirmed dispensed!\n");
             return true;
         }
 
-        printf("WARNING: Pill not detected - rotating again...\n");
+        printf("WARNING: IR did not confirm pill - retrying...\n");
     }
 
     printf("ERROR: Pill failed to dispense after %d attempts\n", MAX_RETRIES);
@@ -255,7 +252,7 @@ bool dispenser_execute_dose_sensor_based(void) {
     printf("\n=== SENSOR-BASED DOSE DISPENSING ===\n");
     printf("Dispensing %d pills of %s (Slot %d)...\n", 
            profile->pills_per_dose, profile->medication_name, current_profile_slot);
-    printf("Motor runs until piezo + IR both confirm each pill.\n\n");
+    printf("Motor runs until piezo detects impact, IR confirms pill dispensed.\n\n");
 
     // Dispense each pill using sensor feedback
     bool all_pills_dispensed = true;

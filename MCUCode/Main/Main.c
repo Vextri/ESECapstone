@@ -14,6 +14,7 @@
 #include "motor_control.h"
 #include "pill_dispenser.h"
 #include "sensor_interrupts.h"
+#include "stepper_control.h"
 #include <stdio.h>
 
 // Sensor callback functions
@@ -43,6 +44,9 @@ int main() {
     
     // Initialize pill dispenser system (includes motor init)
     dispenser_init();
+
+    // Initialize stepper motor
+    stepper_init();
     
     // Initialize sensor interrupt system
     sensor_interrupts_init();
@@ -80,6 +84,10 @@ int main() {
     printf("--- Manual Motor Control ---\n");
     printf("W - Motor forward\n");
     printf("X - Motor stop\n");
+    printf("--- Stepper Motor Control ---\n");
+    printf("A - Stepper forward (continuous)\n");
+    printf("Z - Stepper backward (continuous)\n");
+    printf("E - Stepper stop\n");
     printf("Q - Quit\n");
     printf("==============================\n\n");
 
@@ -201,7 +209,26 @@ int main() {
                     printf("Manual motor stop\n");
                     motor_stop();
                     break;
-                    
+
+                // Stepper motor control
+                case 'a':
+                case 'A':
+                    printf("Stepper forward\n");
+                    stepper_set_direction(STEPPER_FORWARD);
+                    break;
+
+                case 'z':
+                case 'Z':
+                    printf("Stepper backward\n");
+                    stepper_set_direction(STEPPER_BACKWARD);
+                    break;
+
+                case 'e':
+                case 'E':
+                    printf("Stepper stop (steps: %lu)\n", stepper_get_step_count());
+                    stepper_stop();
+                    break;
+
                 case 'q':
                 case 'Q':
                     printf("Shutting down dispenser...\n");
@@ -213,8 +240,11 @@ int main() {
             }
         }
         
+        // Advance stepper motor one half-step if due
+        stepper_task();
+
         // Small delay to prevent excessive CPU usage
-        sleep_ms(10);
+        sleep_ms(1);
     }
 
     return 0;

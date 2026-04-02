@@ -15,7 +15,7 @@
 // Pin definitions (DRV8833: AIN1=GPIO1, AIN2=GPIO2, no separate enable pin)
 #define AIN1_PIN 1   // DRV8833 AIN1 - PWM for forward
 #define AIN2_PIN 2   // DRV8833 AIN2 - PWM for backward
-#define MOTOR_SPEED 800  // PWM duty cycle (0-999), 750 = 75%
+#define MOTOR_SPEED 900  // PWM duty cycle (0-999), 900 = 90%
 
 // Motor direction states
 typedef enum {
