@@ -1,9 +1,12 @@
 #include <stdio.h>
+#include <stdlib.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <string.h>
 #include <time.h>
 #include <stdbool.h>
 
+#include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
@@ -35,39 +38,62 @@ static const char *TAG = "time_server";
 #define UART_BRIDGE_RX_PIN 11
 #define UART_BRIDGE_BUFFER_SIZE 512
 #define UART_BRIDGE_LINE_SIZE 256
-#define UART_BRIDGE_REQUEST_INTERVAL_MS 1000
 #define UART_BRIDGE_TIMEOUT_US (5 * 1000000)
+#define PILL_SLOT_COUNT 3
+#define STATUS_RESPONSE_BUFFER_SIZE 4096
+#define STATUS_SLOTS_BUFFER_SIZE 2048
+
+typedef struct {
+	int pills_left;
+	int pills_per_dose;
+	int doses_remaining;
+	int slot_number;
+	char medication_name[32];
+	char last_dispensed[64];
+	char last_event[96];
+	char notes[96];
+	char last_dispense_result[16];
+	bool has_data;
+} pill_slot_state_t;
 
 typedef struct {
 	bool connected;
 	int active_profile_slot;
-	int pills_left;
-	int pills_per_dose;
-	int doses_remaining;
-	char medication_name[32];
 	char controller_transport[32];
-	char last_dispensed[64];
-	char last_event[96];
-	char notes[96];
+	pill_slot_state_t slots[PILL_SLOT_COUNT];
 	int64_t last_update_us;
 } pico_bridge_state_t;
 
 static SemaphoreHandle_t bridge_state_mutex;
 static pico_bridge_state_t bridge_state;
 
-static void bridge_state_reset_defaults(void)
+static void bridge_reset_slot_defaults(pill_slot_state_t *slot_state, int slot_number)
 {
-	bridge_state.connected = false;
-	bridge_state.active_profile_slot = 0;
-	bridge_state.pills_left = 15;
-	bridge_state.pills_per_dose = 2;
-	bridge_state.doses_remaining = 7;
-	strcpy(bridge_state.medication_name, "Vitamin D");
-	strcpy(bridge_state.controller_transport, "UART bridge pending");
-	strcpy(bridge_state.last_dispensed, "No confirmed dispense yet");
-	strcpy(bridge_state.last_event, "ESP dashboard ready. Waiting for Pico 2 data link.");
-	strcpy(bridge_state.notes, "Send STATUS|med=...|slot=...|left=...|dose=...|doses=...|last=...|event=...");
-	bridge_state.last_update_us = 0;
+	slot_state->pills_left = -1;
+	slot_state->pills_per_dose = -1;
+	slot_state->doses_remaining = -1;
+	slot_state->slot_number = slot_number;
+	strcpy(slot_state->medication_name, "Waiting for data");
+	strcpy(slot_state->last_dispensed, "No confirmed dispense yet");
+	strcpy(slot_state->last_event, "Waiting for live data");
+	strcpy(slot_state->notes, "Waiting for live pill slot data.");
+	strcpy(slot_state->last_dispense_result, "unknown");
+	slot_state->has_data = false;
+}
+
+static void bridge_state_reset_defaults(pico_bridge_state_t *state)
+{
+	int slot_index;
+
+	state->connected = false;
+	state->active_profile_slot = 1;
+	strcpy(state->controller_transport, "UART bridge pending");
+	for (slot_index = 0; slot_index < PILL_SLOT_COUNT; ++slot_index) {
+		bridge_reset_slot_defaults(&state->slots[slot_index], slot_index + 1);
+	}
+	strcpy(state->slots[0].last_event, "ESP dashboard ready. Waiting for Pico 2 data link.");
+	strcpy(state->slots[0].notes, "Send STATUS|slot=1..3|med=...|left=...|dose=...|doses=...|last=...|event=...|result=ok/fail");
+	state->last_update_us = 0;
 }
 
 static void bridge_copy_string(char *dest, size_t dest_size, const char *src)
@@ -85,6 +111,76 @@ static void bridge_copy_string(char *dest, size_t dest_size, const char *src)
 	dest[dest_size - 1] = '\0';
 }
 
+static int bridge_slot_index_from_number(int slot_number)
+{
+	if (slot_number < 1 || slot_number > PILL_SLOT_COUNT) {
+		return -1;
+	}
+
+	return slot_number - 1;
+}
+
+static const pill_slot_state_t *bridge_get_active_slot_const(const pico_bridge_state_t *state)
+{
+	int slot_index = bridge_slot_index_from_number(state->active_profile_slot);
+
+	if (slot_index < 0) {
+		slot_index = 0;
+	}
+
+	return &state->slots[slot_index];
+}
+
+static int bridge_extract_slot_number(const char *line)
+{
+	char line_copy[UART_BRIDGE_LINE_SIZE];
+	char *saveptr = NULL;
+	char *token;
+
+	bridge_copy_string(line_copy, sizeof(line_copy), line);
+	token = strtok_r(line_copy, "|", &saveptr);
+	while ((token = strtok_r(NULL, "|", &saveptr)) != NULL) {
+		char *separator = strchr(token, '=');
+
+		if (separator == NULL) {
+			continue;
+		}
+
+		*separator = '\0';
+		if (strcmp(token, "slot") == 0) {
+			return atoi(separator + 1);
+		}
+	}
+
+	return -1;
+}
+
+static bool bridge_append_text(char *buffer, size_t buffer_size, size_t *used, const char *format, ...)
+{
+	va_list args;
+	int written;
+
+	if (*used >= buffer_size) {
+		return false;
+	}
+
+	va_start(args, format);
+	written = vsnprintf(buffer + *used, buffer_size - *used, format, args);
+	va_end(args);
+
+	if (written < 0) {
+		return false;
+	}
+
+	if ((size_t)written >= (buffer_size - *used)) {
+		*used = buffer_size - 1;
+		return false;
+	}
+
+	*used += (size_t)written;
+	return true;
+}
+
 static void bridge_update_connected_flag_locked(void)
 {
 	int64_t age_us = esp_timer_get_time() - bridge_state.last_update_us;
@@ -96,32 +192,40 @@ static void bridge_update_connected_flag_locked(void)
 	}
 }
 
-static void bridge_apply_field(pico_bridge_state_t *state, const char *key, const char *value)
+static void bridge_apply_field(pico_bridge_state_t *state, pill_slot_state_t *slot_state, const char *key, const char *value)
 {
 	if (strcmp(key, "med") == 0) {
-		bridge_copy_string(state->medication_name, sizeof(state->medication_name), value);
+		bridge_copy_string(slot_state->medication_name, sizeof(slot_state->medication_name), value);
 	} else if (strcmp(key, "slot") == 0) {
 		state->active_profile_slot = atoi(value);
 	} else if (strcmp(key, "left") == 0) {
-		state->pills_left = atoi(value);
+		slot_state->pills_left = atoi(value);
 	} else if (strcmp(key, "dose") == 0) {
-		state->pills_per_dose = atoi(value);
+		slot_state->pills_per_dose = atoi(value);
 	} else if (strcmp(key, "doses") == 0) {
-		state->doses_remaining = atoi(value);
+		slot_state->doses_remaining = atoi(value);
 	} else if (strcmp(key, "last") == 0) {
-		bridge_copy_string(state->last_dispensed, sizeof(state->last_dispensed), value);
+		bridge_copy_string(slot_state->last_dispensed, sizeof(slot_state->last_dispensed), value);
 	} else if (strcmp(key, "event") == 0) {
-		bridge_copy_string(state->last_event, sizeof(state->last_event), value);
+		bridge_copy_string(slot_state->last_event, sizeof(slot_state->last_event), value);
 	} else if (strcmp(key, "notes") == 0) {
-		bridge_copy_string(state->notes, sizeof(state->notes), value);
+		bridge_copy_string(slot_state->notes, sizeof(slot_state->notes), value);
+	} else if (strcmp(key, "result") == 0) {
+		bridge_copy_string(slot_state->last_dispense_result, sizeof(slot_state->last_dispense_result), value);
 	}
 }
 
 static void bridge_process_uart_line(char *line)
 {
+	char raw_line[UART_BRIDGE_LINE_SIZE];
 	char *saveptr = NULL;
 	char *token = strtok_r(line, "|", &saveptr);
 	pico_bridge_state_t updated_state;
+	pill_slot_state_t *slot_state;
+	int slot_number;
+	int slot_index;
+
+	bridge_copy_string(raw_line, sizeof(raw_line), line);
 
 	if (token == NULL) {
 		return;
@@ -137,6 +241,20 @@ static void bridge_process_uart_line(char *line)
 	}
 
 	updated_state = bridge_state;
+	slot_number = bridge_extract_slot_number(raw_line);
+	if (slot_number < 0) {
+		slot_number = updated_state.active_profile_slot;
+	}
+
+	slot_index = bridge_slot_index_from_number(slot_number);
+	if (slot_index < 0) {
+		ESP_LOGW(TAG, "Ignoring STATUS update with invalid slot number: %d", slot_number);
+		xSemaphoreGive(bridge_state_mutex);
+		return;
+	}
+
+	updated_state.active_profile_slot = slot_number;
+	slot_state = &updated_state.slots[slot_index];
 	while ((token = strtok_r(NULL, "|", &saveptr)) != NULL) {
 		char *separator = strchr(token, '=');
 		if (separator == NULL) {
@@ -144,9 +262,10 @@ static void bridge_process_uart_line(char *line)
 		}
 
 		*separator = '\0';
-		bridge_apply_field(&updated_state, token, separator + 1);
+		bridge_apply_field(&updated_state, slot_state, token, separator + 1);
 	}
 
+	slot_state->has_data = true;
 	updated_state.last_update_us = esp_timer_get_time();
 	updated_state.connected = true;
 	bridge_copy_string(updated_state.controller_transport,
@@ -163,7 +282,6 @@ static void uart_bridge_task(void *arg)
 	char line_buffer[UART_BRIDGE_LINE_SIZE];
 	size_t line_length = 0;
 	uint8_t rx_buffer[64];
-	int64_t last_request_us = 0;
 
 	(void)arg;
 
@@ -195,11 +313,6 @@ static void uart_bridge_task(void *arg)
 			}
 		}
 
-		if ((esp_timer_get_time() - last_request_us) >= (UART_BRIDGE_REQUEST_INTERVAL_MS * 1000LL)) {
-			uart_write_bytes(UART_BRIDGE_PORT, "GET_STATUS\n", strlen("GET_STATUS\n"));
-			last_request_us = esp_timer_get_time();
-		}
-
 		if (xSemaphoreTake(bridge_state_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
 			bridge_update_connected_flag_locked();
 			xSemaphoreGive(bridge_state_mutex);
@@ -224,7 +337,7 @@ static void start_uart_bridge(void)
 		return;
 	}
 
-	bridge_state_reset_defaults();
+	bridge_state_reset_defaults(&bridge_state);
 
 	ESP_ERROR_CHECK(uart_driver_install(UART_BRIDGE_PORT,
 					     UART_BRIDGE_BUFFER_SIZE,
@@ -240,7 +353,7 @@ static void start_uart_bridge(void)
 					  UART_PIN_NO_CHANGE));
 
 	ESP_LOGI(TAG,
-		 "UART bridge ready on ESP GPIO%d(TX) and GPIO%d(RX). Expecting STATUS lines from Pico.",
+		 "UART bridge ready on ESP GPIO%d(TX) and GPIO%d(RX). Waiting for Pico to push STATUS events.",
 		 UART_BRIDGE_TX_PIN,
 		 UART_BRIDGE_RX_PIN);
 	xTaskCreate(uart_bridge_task, "uart_bridge", 4096, NULL, 5, NULL);
@@ -392,8 +505,22 @@ static bool ap_uses_password(void)
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
 	char time_buf[64];
-	char response[1024];
+	char *response;
+	char *slots_json;
+	size_t slots_used = 0;
 	pico_bridge_state_t snapshot;
+	const pill_slot_state_t *active_slot;
+	int slot_index;
+	esp_err_t result;
+
+	response = malloc(STATUS_RESPONSE_BUFFER_SIZE);
+	slots_json = malloc(STATUS_SLOTS_BUFFER_SIZE);
+	if (response == NULL || slots_json == NULL) {
+		free(response);
+		free(slots_json);
+		ESP_LOGE(TAG, "Failed to allocate status response buffers");
+		return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+	}
 
 	get_device_time_string(time_buf, sizeof(time_buf));
 	memset(&snapshot, 0, sizeof(snapshot));
@@ -403,12 +530,34 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 		snapshot = bridge_state;
 		xSemaphoreGive(bridge_state_mutex);
 	} else {
-		bridge_state_reset_defaults();
-		snapshot = bridge_state;
+		bridge_state_reset_defaults(&snapshot);
 	}
 
+	active_slot = bridge_get_active_slot_const(&snapshot);
+	bridge_append_text(slots_json, STATUS_SLOTS_BUFFER_SIZE, &slots_used, "[");
+	for (slot_index = 0; slot_index < PILL_SLOT_COUNT; ++slot_index) {
+		const pill_slot_state_t *slot_state = &snapshot.slots[slot_index];
+
+		bridge_append_text(slots_json,
+				   STATUS_SLOTS_BUFFER_SIZE,
+				   &slots_used,
+				   "%s{\"slot\":%d,\"has_data\":%s,\"medication_name\":\"%s\",\"pills_left\":%d,\"pills_per_dose\":%d,\"doses_remaining\":%d,\"last_dispensed\":\"%s\",\"last_event\":\"%s\",\"last_dispense_result\":\"%s\",\"notes\":\"%s\"}",
+				   slot_index == 0 ? "" : ",",
+				   slot_state->slot_number,
+				   json_bool(slot_state->has_data),
+				   slot_state->medication_name,
+				   slot_state->pills_left,
+				   slot_state->pills_per_dose,
+				   slot_state->doses_remaining,
+				   slot_state->last_dispensed,
+				   slot_state->last_event,
+				   slot_state->last_dispense_result,
+				   slot_state->notes);
+	}
+	bridge_append_text(slots_json, STATUS_SLOTS_BUFFER_SIZE, &slots_used, "]");
+
 	snprintf(response,
-			 sizeof(response),
+			 STATUS_RESPONSE_BUFFER_SIZE,
 			 "{"
 			 "\"device_time\":\"%s\","
 			 "\"bridge_connected\":%s,"
@@ -416,6 +565,7 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 			 "\"controller_name\":\"Raspberry Pi Pico 2\","
 			 "\"controller_transport\":\"%s\","
 			 "\"active_profile_slot\":%d,"
+			 "\"slot_count\":%d,"
 			 "\"medication_name\":\"%s\","
 			 "\"pills_left\":%d,"
 			 "\"pills_per_dose\":%d,"
@@ -426,22 +576,30 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 			 "\"ir_enabled\":true,"
 			 "\"last_dispensed\":\"%s\","
 			 "\"last_event\":\"%s\","
-			 "\"notes\":\"%s\""
+			 "\"last_dispense_result\":\"%s\","
+			 "\"notes\":\"%s\","
+			 "\"slots\":%s"
 			 "}",
 			 time_buf,
 			 json_bool(snapshot.connected),
 			 snapshot.controller_transport,
 			 snapshot.active_profile_slot,
-			 snapshot.medication_name,
-			 snapshot.pills_left,
-			 snapshot.pills_per_dose,
-			 snapshot.doses_remaining,
-			 snapshot.last_dispensed,
-			 snapshot.last_event,
-			 snapshot.notes);
+			 PILL_SLOT_COUNT,
+			 active_slot->medication_name,
+			 active_slot->pills_left,
+			 active_slot->pills_per_dose,
+			 active_slot->doses_remaining,
+			 active_slot->last_dispensed,
+			 active_slot->last_event,
+			 active_slot->last_dispense_result,
+			 active_slot->notes,
+			 slots_json);
 
 	httpd_resp_set_type(req, "application/json");
-	return httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+	result = httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
+	free(response);
+	free(slots_json);
+	return result;
 }
 
 static esp_err_t root_get_handler(httpd_req_t *req)
@@ -472,6 +630,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		".dot{width:10px;height:10px;border-radius:50%;background:currentColor;box-shadow:0 0 0 6px rgba(255,255,255,.18);}"
 		".grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;}"
 		".metric{padding:16px;border-radius:20px;background:#fffdf9;border:1px solid var(--line);}"
+		".slot-card{transition:border-color .2s ease,transform .2s ease,box-shadow .2s ease;}"
+		".slot-card.active{border-color:rgba(15,118,110,.5);box-shadow:0 16px 36px rgba(15,118,110,.12);transform:translateY(-2px);}"
 		".metric .label{font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:var(--muted);margin-bottom:10px;}"
 		".metric .value{font-family:Georgia,\"Times New Roman\",serif;font-size:2rem;line-height:1;margin-bottom:8px;}"
 		".metric .hint{font-size:.95rem;color:var(--muted);line-height:1.35;}"
@@ -488,6 +648,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		".row:first-child{padding-top:0;}"
 		".k{color:var(--muted);}"
 		".v{font-weight:700;text-align:right;}"
+		".result-ok{color:#0e5d58;}"
+		".result-fail{color:#b91c1c;}"
 		".footer{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px;color:var(--muted);font-size:.92rem;}"
 		".footer-card{padding:12px 14px;border-radius:16px;background:rgba(255,255,255,.58);border:1px solid rgba(255,255,255,.7);}"
 		"@media (max-width:760px){.shell{padding:14px 14px 28px;}.hero{padding:20px;}}"
@@ -511,14 +673,23 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"</div>"
 		"</section>"
 		"<section class=\"panel\">"
-		"<div class=\"panel-head\"><div><p class=\"panel-title\">Profile Snapshot</p><div>Current pill slot data and last dispense information.</div></div></div>"
+		"<div class=\"panel-head\"><div><p class=\"panel-title\">Slot Overview</p><div>Three slot records are shown below. The active slot is highlighted and mirrored in the detail panel.</div></div></div>"
 		"<div class=\"grid\">"
-		"<article class=\"metric accent-teal\"><div class=\"label\">Medication</div><div class=\"value\" id=\"medication-name\">Vitamin D</div><div class=\"hint\">Active profile slot <span id=\"profile-slot\">0</span>.</div></article>"
+		"<article class=\"metric accent-teal slot-card\" id=\"slot-card-1\"><div class=\"label\">Slot 1</div><div class=\"value\" id=\"slot-medication-1\">Waiting for data</div><div class=\"hint\">Pills left: <span id=\"slot-left-1\">--</span></div><div class=\"hint\">Dose: <span id=\"slot-dose-1\">--</span> | Doses remaining: <span id=\"slot-doses-1\">--</span></div><div class=\"hint\">Result: <span id=\"slot-result-1\">unknown</span></div></article>"
+		"<article class=\"metric accent-amber slot-card\" id=\"slot-card-2\"><div class=\"label\">Slot 2</div><div class=\"value\" id=\"slot-medication-2\">Waiting for data</div><div class=\"hint\">Pills left: <span id=\"slot-left-2\">--</span></div><div class=\"hint\">Dose: <span id=\"slot-dose-2\">--</span> | Doses remaining: <span id=\"slot-doses-2\">--</span></div><div class=\"hint\">Result: <span id=\"slot-result-2\">unknown</span></div></article>"
+		"<article class=\"metric accent-teal slot-card\" id=\"slot-card-3\"><div class=\"label\">Slot 3</div><div class=\"value\" id=\"slot-medication-3\">Waiting for data</div><div class=\"hint\">Pills left: <span id=\"slot-left-3\">--</span></div><div class=\"hint\">Dose: <span id=\"slot-dose-3\">--</span> | Doses remaining: <span id=\"slot-doses-3\">--</span></div><div class=\"hint\">Result: <span id=\"slot-result-3\">unknown</span></div></article>"
+		"</div>"
+		"</section>"
+		"<section class=\"panel\">"
+		"<div class=\"panel-head\"><div><p class=\"panel-title\">Active Slot Detail</p><div>Most recent details for the slot identified by the Pico in its STATUS update.</div></div></div>"
+		"<div class=\"grid\">"
+		"<article class=\"metric accent-teal\"><div class=\"label\">Medication</div><div class=\"value\" id=\"medication-name\">Waiting for data</div><div class=\"hint\">Active profile slot <span id=\"profile-slot\">1</span>.</div></article>"
 		"<article class=\"metric accent-amber\"><div class=\"label\">Pills Left</div><div class=\"value\" id=\"pills-left\">--</div><div class=\"hint\"><span id=\"doses-remaining\">--</span> full doses remaining at <span id=\"pills-per-dose\">--</span> pills per dose.</div></article>"
 		"</div>"
 		"<div class=\"list\">"
 		"<div class=\"row\"><span class=\"k\">Last Dispense</span><span class=\"v\" id=\"last-dispensed\">No confirmed dispense yet</span></div>"
 		"<div class=\"row\"><span class=\"k\">Last Event</span><span class=\"v\" id=\"last-event\">Waiting for live data</span></div>"
+		"<div class=\"row\"><span class=\"k\">Last Result</span><span class=\"v\" id=\"last-result\">Waiting</span></div>"
 		"<div class=\"row\"><span class=\"k\">Profile Notes</span><span class=\"v\" id=\"dashboard-notes\">Waiting for live pill slot data.</span></div>"
 		"</div>"
 		"</section>"
@@ -531,7 +702,11 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"</div>"
 		"</main>"
 		"<script>"
+		"const displayNumber=v=>typeof v==='number'&&v>=0?String(v):'--';"
 		"const text=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=value;};"
+		"const setResult=(id,value)=>{const el=document.getElementById(id);if(!el)return;const normalized=value||'unknown';el.textContent=normalized==='ok'?'Pass':normalized==='fail'?'Fail':normalized;el.className=(id==='last-result'?'v ':'')+(normalized==='ok'?'result-ok':normalized==='fail'?'result-fail':'');};"
+		"const setActiveSlotCard=slot=>{for(let n=1;n<=3;n+=1){const card=document.getElementById('slot-card-'+n);if(card)card.className='metric '+(n%2===1?'accent-teal ':'accent-amber ')+'slot-card'+(n===slot?' active':'');}};"
+		"const setSlotCard=slot=>{if(!slot||slot.slot==null)return;text('slot-medication-'+slot.slot,slot.medication_name||'Waiting for data');text('slot-left-'+slot.slot,displayNumber(slot.pills_left));text('slot-dose-'+slot.slot,displayNumber(slot.pills_per_dose));text('slot-doses-'+slot.slot,displayNumber(slot.doses_remaining));setResult('slot-result-'+slot.slot,slot.last_dispense_result||'unknown');};"
 		"const setBridgeState=(connected,status)=>{const pill=document.getElementById('bridge-pill');text('bridge-label',connected?'Connected to Pico':'Bridge Pending');text('bridge-copy',connected?'The ESP is receiving live Raspberry Pi Pico updates.':'The ESP page is up. Waiting for live Raspberry Pi Pico data.');if(pill)pill.className=connected?'status-pill online':'status-pill';if(status){text('controller-transport',status);} };"
 		"async function refreshStatus(){"
 		"try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw new Error('bad-response');const d=await r.json();"
@@ -540,12 +715,15 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"text('controller-transport',d.controller_transport||'Waiting for UART bridge');"
 		"text('medication-name',d.medication_name||'No active profile');"
 		"text('profile-slot',d.active_profile_slot!=null?d.active_profile_slot:'-');"
-		"text('pills-left',d.pills_left!=null?d.pills_left:'--');"
-		"text('pills-per-dose',d.pills_per_dose!=null?d.pills_per_dose:'--');"
-		"text('doses-remaining',d.doses_remaining!=null?d.doses_remaining:'--');"
+		"text('pills-left',displayNumber(d.pills_left));"
+		"text('pills-per-dose',displayNumber(d.pills_per_dose));"
+		"text('doses-remaining',displayNumber(d.doses_remaining));"
 		"text('last-dispensed',d.last_dispensed||'No confirmed dispense yet');"
 		"text('last-event',d.last_event||'Waiting for live data');"
+		"setResult('last-result',d.last_dispense_result||'unknown');"
 		"text('dashboard-notes',d.notes||'Waiting for live pill slot data.');"
+		"(Array.isArray(d.slots)?d.slots:[]).forEach(setSlotCard);"
+		"setActiveSlotCard(Number(d.active_profile_slot)||1);"
 		"setBridgeState(Boolean(d.bridge_connected),d.controller_transport);"
 		"}catch(e){text('device-time','Disconnected');text('last-event','ESP status endpoint is unavailable.');setBridgeState(false,'ESP status unavailable');}"
 		"}"
@@ -560,6 +738,7 @@ static void start_webserver(void)
 {
 	httpd_config_t config = HTTPD_DEFAULT_CONFIG();
 	httpd_handle_t server = NULL;
+	config.max_uri_handlers = 11;
 	config.uri_match_fn = httpd_uri_match_wildcard;
 
 	if (httpd_start(&server, &config) == ESP_OK) {
@@ -679,6 +858,7 @@ static void start_wifi_ap(void)
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
 	ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
 	ESP_ERROR_CHECK(esp_wifi_start());
+	esp_wifi_set_max_tx_power(84); /* 84 = 21 dBm, maximum */
 
 	ESP_LOGI(TAG, "Wi-Fi AP started. SSID: %s, Password: %s", AP_SSID, use_password ? AP_PASS : "<open>");
 	ESP_LOGI(TAG, "Open portal: http://192.168.4.1/");

@@ -4,15 +4,78 @@
 
 #include "pill_dispenser.h"
 #include "sensor_interrupts.h"
+#include "hardware/gpio.h"
+#include "hardware/uart.h"
 #include "pico/stdlib.h"
 #include "pico/time.h"
 #include <stdio.h>
 #include <string.h>
 
+#define ESP_UART uart1
+#define ESP_UART_BAUD 115200
+#define ESP_UART_TX_PIN 20
+#define ESP_UART_RX_PIN 21
+
 static dispense_profile_t profiles[MAX_PROFILES];
 static int8_t current_profile_slot = -1;
 
+static void format_status_timestamp(char *buffer, size_t buffer_size) {
+    uint32_t uptime_seconds = to_ms_since_boot(get_absolute_time()) / 1000;
+    uint32_t hours = uptime_seconds / 3600;
+    uint32_t minutes = (uptime_seconds % 3600) / 60;
+    uint32_t seconds = uptime_seconds % 60;
+
+    snprintf(buffer, buffer_size, "uptime %02lu:%02lu:%02lu",
+             (unsigned long)hours,
+             (unsigned long)minutes,
+             (unsigned long)seconds);
+}
+
+static void send_status_update(const dispense_profile_t *profile,
+                               int8_t profile_slot,
+                               const char *event,
+                               const char *result,
+                               const char *notes) {
+    char timestamp[32];
+    char line[320];
+    uint32_t doses_remaining;
+    int length;
+
+    if (profile == NULL || !profile->is_active) {
+        return;
+    }
+
+    format_status_timestamp(timestamp, sizeof(timestamp));
+    doses_remaining = profile->pills_per_dose > 0
+        ? profile->pills_remaining / profile->pills_per_dose
+        : 0;
+
+    length = snprintf(line,
+                      sizeof(line),
+                      "STATUS|slot=%d|med=%s|left=%d|dose=%d|doses=%lu|last=%s|event=%s|result=%s|notes=%s\n",
+                      (int)profile_slot + 1,
+                      profile->medication_name,
+                      profile->pills_remaining,
+                      profile->pills_per_dose,
+                      (unsigned long)doses_remaining,
+                      timestamp,
+                      event,
+                      result,
+                      notes);
+
+    if (length > 0) {
+        uart_write_blocking(ESP_UART, (const uint8_t *)line, (size_t)length);
+        printf("[ESP TX] %s", line);
+    }
+}
+
 void dispenser_init(void) {
+    uart_init(ESP_UART, ESP_UART_BAUD);
+    gpio_set_function(ESP_UART_TX_PIN, GPIO_FUNC_UART);
+    gpio_set_function(ESP_UART_RX_PIN, GPIO_FUNC_UART);
+    uart_set_format(ESP_UART, 8, 1, UART_PARITY_NONE);
+    uart_set_hw_flow(ESP_UART, false, false);
+
     motor_init();
     
     // Initialize all profile slots as empty
@@ -103,6 +166,11 @@ bool dispenser_execute_dose(void) {
     if (profile->pills_remaining < profile->pills_per_dose) {
         printf("ERROR: Insufficient pills remaining (%d needed, %d available)\n", 
                profile->pills_per_dose, profile->pills_remaining);
+        send_status_update(profile,
+                           current_profile_slot,
+                           "Dispense rejected",
+                           "fail",
+                           "Not enough pills for timed dispense");
         return false;
     }
     
@@ -124,6 +192,11 @@ bool dispenser_execute_dose(void) {
     }
     
     printf("Dose complete! Pills remaining: %d\n", profile->pills_remaining);
+    send_status_update(profile,
+                       current_profile_slot,
+                       "Dispense complete",
+                       "ok",
+                       "Timed dispense completed");
     return true;
 }
 
@@ -182,6 +255,10 @@ bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms) {
     for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         if (attempt > 1) {
             printf("--- Retry attempt %d/%d ---\n", attempt, MAX_RETRIES);
+            printf("Reversing motor for 1 second before retry...\n");
+            motor_backward();
+            sleep_ms(1000);
+            motor_stop();
             sleep_ms(500);
         }
 
@@ -247,6 +324,11 @@ bool dispenser_execute_dose_sensor_based(void) {
     if (profile->pills_remaining < profile->pills_per_dose) {
         printf("ERROR: Insufficient pills remaining (%d needed, %d available)\n", 
                profile->pills_per_dose, profile->pills_remaining);
+        send_status_update(profile,
+                           current_profile_slot,
+                           "Dispense rejected",
+                           "fail",
+                           "Not enough pills for sensor dispense");
         return false;
     }
     
@@ -257,12 +339,14 @@ bool dispenser_execute_dose_sensor_based(void) {
 
     // Dispense each pill using sensor feedback
     bool all_pills_dispensed = true;
+    int pills_dispensed = 0;
     for (int i = 0; i < profile->pills_per_dose; i++) {
         printf("--- Dispensing pill %d/%d ---\n", i + 1, profile->pills_per_dose);
         
         // Use sensor-based dispensing with 10 second timeout per pill
         if (dispenser_dispense_single_pill_sensor_based(10000)) {
             profile->pills_remaining--;
+            pills_dispensed++;
             printf("Pill %d successfully dispensed! Remaining: %d\n", 
                    i + 1, profile->pills_remaining);
         } else {
@@ -281,8 +365,25 @@ bool dispenser_execute_dose_sensor_based(void) {
     if (all_pills_dispensed) {
         printf("\n✓ DOSE COMPLETE! All %d pills dispensed successfully\n", profile->pills_per_dose);
         printf("Pills remaining in profile: %d\n", profile->pills_remaining);
+        send_status_update(profile,
+                           current_profile_slot,
+                           "Dispense complete",
+                           "ok",
+                           "Sensor dispense completed");
     } else {
         printf("\n⚠ DOSE INCOMPLETE! Some pills failed to dispense\n");
+        char failure_notes[96];
+
+        snprintf(failure_notes,
+                 sizeof(failure_notes),
+                 "Sensor dispense incomplete: %d of %d pills dispensed",
+                 pills_dispensed,
+                 profile->pills_per_dose);
+        send_status_update(profile,
+                           current_profile_slot,
+                           "Dispense incomplete",
+                           "fail",
+                           failure_notes);
     }
     
     printf("====================================\n\n");
