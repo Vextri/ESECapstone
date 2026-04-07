@@ -1,0 +1,235 @@
+================================================================================
+                 ESP32-S3 SERVER - DESIGN OVERVIEW DOCUMENTATION
+================================================================================
+Date: April 5, 2026
+Platform: Waveshare ESP32-S3-Pico
+Framework: ESP-IDF v6.0
+Build System: CMake + Ninja
+
+================================================================================
+                                SYSTEM OVERVIEW
+================================================================================
+
+This firmware turns the ESP32-S3 board into the network-facing interface for the
+pill dispenser system. The ESP hosts a local Wi-Fi access point, provides a
+captive-portal-style web dashboard, and acts as a UART bridge between the web UI
+and the Raspberry Pi Pico 2 dispenser controller.
+
+Current Responsibilities:
+- Create a local Wi-Fi network for phone or laptop access
+- Redirect clients to a local portal using a lightweight DNS responder
+- Serve a live dashboard and JSON status API over HTTP
+- Poll the Pico 2 over UART for dispenser state
+- Cache the latest Pico state and expose it to the website
+
+Design Intent:
+- ESP32-S3 handles connectivity, UI, and command transport
+- Pico 2 remains the source of truth for dispenser logic and hardware state
+
+================================================================================
+                             HARDWARE / BOARD CONTEXT
+================================================================================
+
+Board Target:
+- Waveshare ESP32-S3-Pico development board
+
+Relevant Board Notes:
+- USB-C is used for flashing and serial monitor access
+- ESP console output currently uses UART console pins configured by ESP-IDF
+- Additional UART bridge pins are selected for Pico-to-ESP communication
+
+UART Bridge Pins Used In Firmware:
+- ESP GPIO 12: UART bridge TX
+- ESP GPIO 11: UART bridge RX
+
+Board Mapping Context:
+- On the Waveshare board, Pico-style header labels map onto internal ESP GPIOs
+- The current UART bridge configuration uses the board's UART-demo-compatible
+  mapping described in the Waveshare documentation
+
+External Connection Requirements:
+- ESP TX -> Pico RX
+- ESP RX -> Pico TX
+- GND -> GND
+- 3.3V logic only
+
+================================================================================
+                              SOFTWARE ARCHITECTURE
+================================================================================
+
+1. Wi-Fi Access Point Layer
+   - Configures the ESP32-S3 as a local AP
+   - Falls back to open-network mode if the configured password is too short for
+     WPA/WPA2 requirements
+   - Intended use is direct local access to the dispenser dashboard
+
+2. Captive DNS Layer
+   - Listens on UDP port 53
+   - Returns the ESP local AP IP address for DNS queries
+   - Helps connected devices route browser traffic toward the local portal
+
+3. HTTP Server Layer
+   - Serves the root dashboard page at /
+   - Serves dispenser status JSON at /api/status
+   - Responds to common captive portal probe URLs from Android, Apple, and
+     Microsoft clients
+
+4. Web UI Layer
+   - Single embedded HTML page stored directly in firmware source
+   - Polls /api/status on a timed interval
+   - Displays three main sections:
+       a. Page header / title section
+       b. Connection State
+       c. Profile Snapshot
+
+5. UART Bridge Layer
+   - Uses UART1 at 115200 baud
+   - Periodically sends GET_STATUS to the Pico 2
+   - Accepts line-based response packets from the Pico 2
+   - Updates cached status when valid STATUS packets are received
+
+6. Status Cache Layer
+   - Stores the most recent dispenser data in RAM
+   - Tracks whether UART data is fresh enough to count as connected
+   - Supplies status to the web API without blocking on a UART read
+
+================================================================================
+                              CURRENT DATA MODEL
+================================================================================
+
+The current ESP cache exposes one summary snapshot to the web UI:
+
+- bridge_connected
+- controller_name
+- controller_transport
+- active_profile_slot
+- medication_name
+- pills_left
+- pills_per_dose
+- doses_remaining
+- last_dispensed
+- last_event
+- notes
+- device_time
+
+Current Limitation:
+- The API is designed around a single active profile snapshot, not all pill slots
+- Future expansion will require an array-based slot model and dispense history
+
+================================================================================
+                            UART PROTOCOL (CURRENT)
+================================================================================
+
+ESP Request:
+- GET_STATUS\n
+
+Expected Pico Response Format:
+- STATUS|med=Vitamin D|slot=0|left=15|dose=2|doses=7|last=2026-04-02 20:00|event=Idle|notes=UART live
+
+Protocol Characteristics:
+- ASCII line-based messaging
+- Simple field parsing using key=value tokens separated by |
+- Chosen for easy debugging during bring-up
+
+Why UART Was Chosen:
+- Simpler than I2C for point-to-point board communication
+- Easier to debug with serial tools and logs
+- Better fit for event/status streaming between ESP and Pico
+
+================================================================================
+                           WEB DASHBOARD DESIGN INTENT
+================================================================================
+
+The ESP dashboard is intentionally lightweight and phone-friendly.
+
+Displayed Information:
+- Current connection state to the Raspberry Pi Pico 2
+- Current device time from the ESP host
+- Active pill profile snapshot
+- Last dispense text
+- Last event text
+
+Current UI State:
+- The dashboard structure is active and updates from /api/status
+- Full multi-slot scheduling and editing are not implemented yet
+
+Future UI Expansion Goals:
+- Show all pill slots at once
+- Show upcoming dispense times per slot
+- Show dispense result history (pass/fail/count)
+- Allow editing medication assignments and schedules from the browser
+
+================================================================================
+                             FUTURE DESIGN CHANGES
+================================================================================
+
+To support the planned product behavior, the following architectural changes are
+expected:
+
+1. Multi-slot data model
+   - Replace single profile snapshot with an array of slot records
+
+2. Scheduling ownership on Pico 2
+   - Pico should own dose schedules and execution timing
+   - ESP should edit and display schedules, not be the only scheduler
+
+3. Expanded UART protocol
+   - Support slot-by-slot data, summary data, and write commands
+
+4. Command API from web UI
+   - Add HTTP POST endpoints to change slot contents or schedules
+   - Forward validated commands to Pico over UART
+
+5. Persistence
+   - Pico must store slot configuration and schedules in nonvolatile memory
+
+================================================================================
+                               SAFETY / RISKS
+================================================================================
+
+Design Risks:
+- If only the ESP owned schedules, dispensing would depend on Wi-Fi/UI health
+- If UART is disconnected, the UI may become stale unless connection freshness is
+  tracked and displayed clearly
+- Incorrect slot-edit commands require validation before being sent to Pico
+
+Current Mitigations:
+- ESP displays connection state separately from profile data
+- UART connection freshness timeout prevents stale data from appearing live
+- Pico remains intended source of truth for physical dispensing logic
+
+================================================================================
+                              BUILD / RUN SUMMARY
+================================================================================
+
+Current Verified Features:
+- ESP-IDF project builds successfully
+- AP mode startup works with short-password fallback to open network
+- Captive DNS task starts
+- HTTP server starts
+- Dashboard loads locally from the ESP
+- UART bridge task starts and polls for status
+
+Manual Use Flow:
+1. Flash ESP32-S3 firmware
+2. Power the board
+3. Connect a phone/laptop to SSID: ESP-Time-Server
+4. Open http://192.168.4.1
+5. Observe Connection State and Profile Snapshot
+6. Wire Pico 2 UART to feed live status into the page
+
+================================================================================
+                               FILE OWNERSHIP
+================================================================================
+
+Key ESP Files:
+- main/main.c            - AP setup, DNS, HTTP server, UI, UART bridge
+- main/CMakeLists.txt    - Component dependencies
+- sdkconfig              - ESP-IDF project configuration
+
+Companion Pico Files:
+- MCUCode/Main/Main.c
+- MCUCode/Main/pill_dispenser.c
+- MCUCode/Main/pill_dispenser.h
+
+================================================================================

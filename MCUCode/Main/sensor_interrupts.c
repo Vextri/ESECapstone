@@ -97,17 +97,12 @@ void hall_effect_interrupt_handler(uint gpio, uint32_t events) {
         return; // Ignore if too soon (switch bounce)
     }
     
-    // Read current GPIO state
-    bool current_state = gpio_get(HALL_EFFECT_PIN);
-    
-    // Detect on both edges (magnetic field change)
-    if (events & (GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL)) {
+    // Detect on falling edge only (HIGH -> LOW transition)
+    if (events & GPIO_IRQ_EDGE_FALL) {
         hall_effect_last_trigger = current_time;
         hall_effect_count++;
         
-        printf("HALL EFFECT: %s edge detected! State: %s, Count: %d at %lu ms\n", 
-               (events & GPIO_IRQ_EDGE_RISE) ? "RISING" : "FALLING",
-               current_state ? "HIGH" : "LOW",
+        printf("HALL EFFECT: FALLING edge (HIGH->LOW), Count: %d at %lu ms\n",
                hall_effect_count, current_time);
         
         // Call user callback if set
@@ -194,7 +189,7 @@ void sensor_interrupts_init(void) {
     // Set up unified GPIO interrupt callback - this is the key fix!
     // The Pico SDK only allows one global GPIO interrupt handler
     gpio_set_irq_enabled_with_callback(PIEZO_PIN, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &gpio_unified_interrupt_handler);
-    gpio_set_irq_enabled(HALL_EFFECT_PIN, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(HALL_EFFECT_PIN, GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(IR_PIN, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
     
     // Initialize state

@@ -100,4 +100,19 @@ void dispenser_simulate_button_press(void);
  */
 void dispenser_test_mode(void);
 
+/**
+ * Dispense a single pill using sensor feedback
+ * Motor runs until both piezo and IR sensors detect the pill
+ * @param timeout_ms Maximum time to wait for sensors (safety timeout)
+ * @return true if pill was successfully dispensed, false if timeout or error
+ */
+bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms);
+
+/**
+ * Execute a dose using sensor-based dispensing instead of timed dispensing
+ * @return true if dose was successfully dispensed, false if error
+ */
+bool dispenser_execute_dose_sensor_based(void);
+void dispenser_test_mode(void);
+
 #endif // PILL_DISPENSER_H

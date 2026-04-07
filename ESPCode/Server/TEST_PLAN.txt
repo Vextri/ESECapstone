@@ -1,0 +1,313 @@
+================================================================================
+                ESP32-S3 SERVER - DESIGN VERIFICATION TEST PLAN
+================================================================================
+Project: Conestoga Capstone - Pill Dispenser ESP Server
+Date: April 5, 2026
+Target Board: Waveshare ESP32-S3-Pico
+Framework: ESP-IDF v6.0
+================================================================================
+
+OVERVIEW
+--------
+This document defines manual verification tests for the ESP32-S3 server portion
+of the pill dispenser project. The tests cover:
+
+  1. Wi-Fi access point startup
+  2. Captive DNS behavior
+  3. HTTP dashboard behavior
+  4. JSON API behavior
+  5. UART bridge behavior with and without a Pico 2 connected
+  6. Connection-state behavior shown in the UI
+
+Required Test Equipment:
+- Waveshare ESP32-S3-Pico board
+- USB-C cable
+- PC with ESP-IDF / VS Code
+- Phone or laptop with Wi-Fi
+- Raspberry Pi Pico 2 (for UART integration tests)
+- Jumper wires for UART and GND
+
+================================================================================
+SECTION 1 - BUILD AND FLASH TESTS
+================================================================================
+
+--- TEST E-01: Clean Build ---
+Precondition: ESP project opens successfully in VS Code.
+Steps:
+  1. Run ESP-IDF build
+  2. Wait for build completion
+Pass:
+  - Build completes successfully
+  - Server.bin is generated
+Fail:
+  - Compile, link, or image generation failure occurs
+
+--- TEST E-02: Flash To Board ---
+Precondition: Correct COM port selected, no serial monitor holding the port open.
+Steps:
+  1. Flash firmware to the ESP32-S3 board
+  2. Reset board if required
+Pass:
+  - Flash completes successfully
+  - Board boots into application
+Fail:
+  - Flash cannot open COM port
+  - Board fails to boot application
+
+================================================================================
+SECTION 2 - WI-FI ACCESS POINT TESTS
+================================================================================
+
+--- TEST W-01: AP Starts Successfully ---
+Precondition: Fresh boot after flashing.
+Steps:
+  1. Open ESP monitor output
+  2. Power/reset the ESP board
+  3. Observe startup logs
+Pass:
+  - Log indicates Wi-Fi AP started
+  - Log shows portal URL http://192.168.4.1/
+Fail:
+  - AP startup aborts or reboots repeatedly
+
+--- TEST W-02: Short Password Fallback ---
+Precondition: AP password in firmware is shorter than 8 characters.
+Steps:
+  1. Boot the firmware
+  2. Observe monitor logs
+Pass:
+  - Warning indicates short password fallback
+  - AP starts as open network instead of crashing
+Fail:
+  - ESP_ERR_WIFI_PASSWORD crash occurs
+
+--- TEST W-03: Client Can Join AP ---
+Precondition: ESP AP running.
+Steps:
+  1. Open Wi-Fi settings on a phone or laptop
+  2. Find SSID ESP-Time-Server
+  3. Connect to it
+Pass:
+  - Client connects successfully
+Fail:
+  - SSID not visible or connection fails
+
+================================================================================
+SECTION 3 - CAPTIVE PORTAL / HTTP TESTS
+================================================================================
+
+--- TEST H-01: Dashboard Page Loads ---
+Precondition: Client connected to ESP AP.
+Steps:
+  1. Open browser
+  2. Visit http://192.168.4.1
+Pass:
+  - Dashboard page loads
+  - Page shows header, Connection State, and Profile Snapshot sections
+Fail:
+  - Browser cannot connect or page is blank/broken
+
+--- TEST H-02: Captive Portal Redirect ---
+Precondition: Client connected to ESP AP.
+Steps:
+  1. On a phone, disconnect and reconnect to the AP
+  2. Observe whether captive portal prompt appears
+  3. If not, visit a random HTTP-only URL
+Pass:
+  - Client is redirected or prompted toward the portal
+Fail:
+  - No redirect behavior is observable
+
+--- TEST H-03: Probe Endpoints Redirect ---
+Precondition: AP and HTTP server running.
+Steps:
+  1. Request /generate_204
+  2. Request /gen_204
+  3. Request /ncsi.txt
+  4. Request /connecttest.txt
+Pass:
+  - Endpoints respond with redirect to /
+Fail:
+  - Requests return error or do not redirect
+
+================================================================================
+SECTION 4 - JSON STATUS API TESTS
+================================================================================
+
+--- TEST A-01: Status Endpoint Responds ---
+Precondition: AP and HTTP server running.
+Steps:
+  1. Open http://192.168.4.1/api/status
+Pass:
+  - JSON is returned
+  - JSON includes device_time, bridge_connected, medication_name, pills_left,
+    pills_per_dose, doses_remaining, last_dispensed, and last_event
+Fail:
+  - Endpoint returns error or malformed JSON
+
+--- TEST A-02: Device Time Updates ---
+Precondition: Dashboard open in browser.
+Steps:
+  1. Observe displayed time field for at least 5 seconds
+Pass:
+  - Time field changes across refresh intervals
+Fail:
+  - Time stays frozen with working API access
+
+--- TEST A-03: Disconnected Bridge State ---
+Precondition: Pico 2 UART not connected.
+Steps:
+  1. Boot ESP with no UART-connected Pico 2
+  2. Open dashboard
+Pass:
+  - Connection state shows bridge pending / not connected
+  - Profile snapshot falls back to default placeholder state
+Fail:
+  - UI claims live connection when no Pico is connected
+
+================================================================================
+SECTION 5 - UART BRIDGE TESTS
+================================================================================
+
+--- TEST U-01: UART Bridge Task Starts ---
+Precondition: ESP booting normally.
+Steps:
+  1. Open monitor output
+  2. Reset board
+Pass:
+  - Log reports UART bridge ready on configured GPIO pins
+Fail:
+  - No UART bridge startup message appears
+
+--- TEST U-02: Wiring Sanity Check ---
+Precondition: Power off both boards before wiring.
+Steps:
+  1. Connect ESP TX to Pico RX
+  2. Connect ESP RX to Pico TX
+  3. Connect ESP GND to Pico GND
+  4. Confirm no 5V is connected to UART pins
+Pass:
+  - Wiring matches intended cross-connection
+Fail:
+  - TX/TX or RX/RX wiring, or missing GND
+
+--- TEST U-03: GET_STATUS Polling Present ---
+Precondition: Logic analyzer, serial sniffer, or Pico firmware capable of logging
+incoming UART data.
+Steps:
+  1. Boot ESP
+  2. Observe UART bridge traffic
+Pass:
+  - GET_STATUS is transmitted approximately once per second
+Fail:
+  - No periodic request is sent
+
+--- TEST U-04: Valid STATUS Packet Updates API ---
+Precondition: Pico or test sender connected to ESP UART.
+Steps:
+  1. Send:
+     STATUS|med=Vitamin D|slot=0|left=15|dose=2|doses=7|last=2026-04-05 20:00|event=Idle|notes=UART live
+  2. Open /api/status
+  3. Open dashboard
+Pass:
+  - JSON reflects the transmitted values
+  - Dashboard updates medication, pill counts, last dispense, and connection state
+Fail:
+  - Data is ignored or partially parsed incorrectly
+
+--- TEST U-05: Connection Timeout Behavior ---
+Precondition: UART status has been received successfully at least once.
+Steps:
+  1. Disconnect Pico UART or stop sending STATUS messages
+  2. Wait longer than 5 seconds
+  3. Refresh dashboard
+Pass:
+  - Connection state returns to pending/not connected
+Fail:
+  - Dashboard remains falsely connected indefinitely
+
+================================================================================
+SECTION 6 - UI CONTENT TESTS
+================================================================================
+
+--- TEST I-01: Simplified Layout Present ---
+Precondition: Dashboard loaded.
+Steps:
+  1. Observe the page structure
+Pass:
+  - Page contains only the requested main areas:
+      a. Header / title section
+      b. Connection State
+      c. Profile Snapshot
+Fail:
+  - Removed sections such as timeline or sensor readiness are still present
+
+--- TEST I-02: Connection State Text Changes ---
+Precondition: Ability to test both disconnected and connected UART cases.
+Steps:
+  1. Observe page with no UART status
+  2. Send valid STATUS packet
+Pass:
+  - Connection text changes meaningfully between pending and connected states
+Fail:
+  - Text does not change or is misleading
+
+--- TEST I-03: Last Dispense Data Visible ---
+Precondition: STATUS packet contains last= field.
+Steps:
+  1. Send STATUS line with last=<value>
+  2. Observe Profile Snapshot panel
+Pass:
+  - Last Dispense row shows received value
+Fail:
+  - Last Dispense field does not update
+
+================================================================================
+SECTION 7 - INTEGRATION TESTS WITH PICO 2
+================================================================================
+
+--- TEST P-01: End-to-End ESP + Pico Link ---
+Precondition: Pico firmware supports GET_STATUS and STATUS response.
+Steps:
+  1. Wire Pico and ESP UART + GND
+  2. Power both boards
+  3. Open ESP dashboard
+Pass:
+  - ESP shows connected state
+  - Dashboard matches Pico-reported status
+Fail:
+  - No data appears or bridge remains disconnected
+
+--- TEST P-02: Live State Change Propagation ---
+Precondition: Pico can change pill/profile state during runtime.
+Steps:
+  1. Change active profile or pill count on Pico side
+  2. Wait up to 2 seconds
+  3. Observe dashboard
+Pass:
+  - UI updates without reflashing the ESP
+Fail:
+  - UI remains stale despite changed Pico status
+
+================================================================================
+KNOWN LIMITATIONS OF CURRENT IMPLEMENTATION
+================================================================================
+
+- ESP UI currently shows only one profile snapshot, not all pill slots
+- ESP does not yet support write commands for editing pills or schedules
+- Last dispense status is currently free-text, not a structured pass/fail/count record
+- Next dispense times are not yet implemented in the protocol
+- Pico-side STATUS response implementation is still required for full live testing
+
+================================================================================
+FUTURE TEST AREAS
+================================================================================
+
+When future features are added, extend this plan with:
+- Multi-slot rendering tests
+- Schedule editing tests
+- POST API command tests
+- Dispense result pass/fail history verification
+- Persistence tests across reboot
+
+================================================================================

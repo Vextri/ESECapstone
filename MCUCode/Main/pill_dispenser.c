@@ -3,14 +3,79 @@
  */
 
 #include "pill_dispenser.h"
+#include "sensor_interrupts.h"
+#include "hardware/gpio.h"
+#include "hardware/uart.h"
 #include "pico/stdlib.h"
+#include "pico/time.h"
 #include <stdio.h>
 #include <string.h>
+
+#define ESP_UART uart1
+#define ESP_UART_BAUD 115200
+#define ESP_UART_TX_PIN 20
+#define ESP_UART_RX_PIN 21
 
 static dispense_profile_t profiles[MAX_PROFILES];
 static int8_t current_profile_slot = -1;
 
+static void format_status_timestamp(char *buffer, size_t buffer_size) {
+    uint32_t uptime_seconds = to_ms_since_boot(get_absolute_time()) / 1000;
+    uint32_t hours = uptime_seconds / 3600;
+    uint32_t minutes = (uptime_seconds % 3600) / 60;
+    uint32_t seconds = uptime_seconds % 60;
+
+    snprintf(buffer, buffer_size, "uptime %02lu:%02lu:%02lu",
+             (unsigned long)hours,
+             (unsigned long)minutes,
+             (unsigned long)seconds);
+}
+
+static void send_status_update(const dispense_profile_t *profile,
+                               int8_t profile_slot,
+                               const char *event,
+                               const char *result,
+                               const char *notes) {
+    char timestamp[32];
+    char line[320];
+    uint32_t doses_remaining;
+    int length;
+
+    if (profile == NULL || !profile->is_active) {
+        return;
+    }
+
+    format_status_timestamp(timestamp, sizeof(timestamp));
+    doses_remaining = profile->pills_per_dose > 0
+        ? profile->pills_remaining / profile->pills_per_dose
+        : 0;
+
+    length = snprintf(line,
+                      sizeof(line),
+                      "STATUS|slot=%d|med=%s|left=%d|dose=%d|doses=%lu|last=%s|event=%s|result=%s|notes=%s\n",
+                      (int)profile_slot + 1,
+                      profile->medication_name,
+                      profile->pills_remaining,
+                      profile->pills_per_dose,
+                      (unsigned long)doses_remaining,
+                      timestamp,
+                      event,
+                      result,
+                      notes);
+
+    if (length > 0) {
+        uart_write_blocking(ESP_UART, (const uint8_t *)line, (size_t)length);
+        printf("[ESP TX] %s", line);
+    }
+}
+
 void dispenser_init(void) {
+    uart_init(ESP_UART, ESP_UART_BAUD);
+    gpio_set_function(ESP_UART_TX_PIN, GPIO_FUNC_UART);
+    gpio_set_function(ESP_UART_RX_PIN, GPIO_FUNC_UART);
+    uart_set_format(ESP_UART, 8, 1, UART_PARITY_NONE);
+    uart_set_hw_flow(ESP_UART, false, false);
+
     motor_init();
     
     // Initialize all profile slots as empty
@@ -101,6 +166,11 @@ bool dispenser_execute_dose(void) {
     if (profile->pills_remaining < profile->pills_per_dose) {
         printf("ERROR: Insufficient pills remaining (%d needed, %d available)\n", 
                profile->pills_per_dose, profile->pills_remaining);
+        send_status_update(profile,
+                           current_profile_slot,
+                           "Dispense rejected",
+                           "fail",
+                           "Not enough pills for timed dispense");
         return false;
     }
     
@@ -122,6 +192,11 @@ bool dispenser_execute_dose(void) {
     }
     
     printf("Dose complete! Pills remaining: %d\n", profile->pills_remaining);
+    send_status_update(profile,
+                       current_profile_slot,
+                       "Dispense complete",
+                       "ok",
+                       "Timed dispense completed");
     return true;
 }
 
@@ -153,7 +228,8 @@ uint8_t dispenser_get_remaining_pills(void) {
 
 void dispenser_simulate_button_press(void) {
     printf("\n>>> BUTTON PRESS SIMULATED <<<\n");
-    dispenser_execute_dose();
+    printf("Using sensor-based dispensing...\n");
+    dispenser_execute_dose_sensor_based();
 }
 
 void dispenser_test_mode(void) {
@@ -165,4 +241,156 @@ void dispenser_test_mode(void) {
     printf("B - Simulate button press\n");
     printf("Q - Quit test mode\n");
     printf("===============================\n");
+}
+
+bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms) {
+    printf("Starting sensor-based pill dispense (timeout: %dms)...\n", timeout_ms);
+
+    // Ensure piezo, IR, and hall effect are enabled
+    if (!piezo_is_enabled()) piezo_enable();
+    if (!ir_is_enabled()) ir_enable();
+    if (!hall_effect_is_enabled()) hall_effect_enable();
+
+    const int MAX_RETRIES = 3;
+
+    for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        if (attempt > 1) {
+            printf("--- Retry attempt %d/%d ---\n", attempt, MAX_RETRIES);
+            printf("Reversing motor for 1 second before retry...\n");
+            motor_backward();
+            sleep_ms(1000);
+            motor_stop();
+            sleep_ms(500);
+        }
+
+        // Reset counts before each attempt so only new events count
+        piezo_reset_count();
+        ir_reset_count();
+        hall_effect_reset_count();
+
+        uint32_t start_time = to_ms_since_boot(get_absolute_time());
+
+        // Start motor - piezo will stop it when pill impact is detected
+        printf("Motor starting (attempt %d)...\n", attempt);
+        motor_forward();
+
+        // Wait for piezo to detect pill impact
+        while (true) {
+            uint32_t now = to_ms_since_boot(get_absolute_time());
+            if (now - start_time > timeout_ms) {
+                printf("TIMEOUT: Piezo did not trigger within %dms (attempt %d/%d)\n",
+                       timeout_ms, attempt, MAX_RETRIES);
+                motor_stop();
+                break;  // Treat as failed attempt, retry up to MAX_RETRIES
+            }
+
+            if (piezo_get_count() > 0) {
+                motor_stop();
+                printf("Pill impact detected - motor stopped.\n");
+                break;
+            }
+
+            sleep_ms(5);
+        }
+
+        // Wait for IR interrupt to register - piezo and IR fire near-simultaneously
+        // so we need enough time for the IRQ handler to increment the count
+        sleep_ms(300);
+
+        uint32_t hall_triggers = hall_effect_get_count();
+        printf("Hall effect triggers for this pill: %lu\n", (unsigned long)hall_triggers);
+
+        // IR confirms pill passed through chute
+        bool ir_ok = ir_get_count() > 0;
+
+        printf("Pill check: Piezo=TRIGGERED | IR=%s\n",
+               ir_ok ? "TRIGGERED" : "NO SIGNAL");
+
+        if (ir_ok) {
+            printf("SUCCESS: Pill confirmed dispensed!\n");
+            return true;
+        }
+
+        printf("WARNING: IR did not confirm pill - retrying...\n");
+    }
+
+    printf("ERROR: Pill failed to dispense after %d attempts\n", MAX_RETRIES);
+    return false;
+}
+
+bool dispenser_execute_dose_sensor_based(void) {
+    if (current_profile_slot < 0 || !profiles[current_profile_slot].is_active) {
+        printf("ERROR: No active dispense profile selected!\n");
+        return false;
+    }
+    
+    dispense_profile_t* profile = &profiles[current_profile_slot];
+    
+    if (profile->pills_remaining < profile->pills_per_dose) {
+        printf("ERROR: Insufficient pills remaining (%d needed, %d available)\n", 
+               profile->pills_per_dose, profile->pills_remaining);
+        send_status_update(profile,
+                           current_profile_slot,
+                           "Dispense rejected",
+                           "fail",
+                           "Not enough pills for sensor dispense");
+        return false;
+    }
+    
+    printf("\n=== SENSOR-BASED DOSE DISPENSING ===\n");
+    printf("Dispensing %d pills of %s (Slot %d)...\n", 
+           profile->pills_per_dose, profile->medication_name, current_profile_slot);
+    printf("Motor runs until piezo detects impact, IR confirms pill dispensed.\n\n");
+
+    // Dispense each pill using sensor feedback
+    bool all_pills_dispensed = true;
+    int pills_dispensed = 0;
+    for (int i = 0; i < profile->pills_per_dose; i++) {
+        printf("--- Dispensing pill %d/%d ---\n", i + 1, profile->pills_per_dose);
+        
+        // Use sensor-based dispensing with 10 second timeout per pill
+        if (dispenser_dispense_single_pill_sensor_based(10000)) {
+            profile->pills_remaining--;
+            pills_dispensed++;
+            printf("Pill %d successfully dispensed! Remaining: %d\n", 
+                   i + 1, profile->pills_remaining);
+        } else {
+            printf("ERROR: Failed to dispense pill %d\n", i + 1);
+            all_pills_dispensed = false;
+            break;  // Stop trying to dispense more pills
+        }
+        
+        // Pause between pills if dispensing multiple
+        if (i < profile->pills_per_dose - 1) {
+            printf("Pausing between pills...\n\n");
+            sleep_ms(1000);  // 1 second pause
+        }
+    }
+    
+    if (all_pills_dispensed) {
+        printf("\n✓ DOSE COMPLETE! All %d pills dispensed successfully\n", profile->pills_per_dose);
+        printf("Pills remaining in profile: %d\n", profile->pills_remaining);
+        send_status_update(profile,
+                           current_profile_slot,
+                           "Dispense complete",
+                           "ok",
+                           "Sensor dispense completed");
+    } else {
+        printf("\n⚠ DOSE INCOMPLETE! Some pills failed to dispense\n");
+        char failure_notes[96];
+
+        snprintf(failure_notes,
+                 sizeof(failure_notes),
+                 "Sensor dispense incomplete: %d of %d pills dispensed",
+                 pills_dispensed,
+                 profile->pills_per_dose);
+        send_status_update(profile,
+                           current_profile_slot,
+                           "Dispense incomplete",
+                           "fail",
+                           failure_notes);
+    }
+    
+    printf("====================================\n\n");
+    return all_pills_dispensed;
 }
