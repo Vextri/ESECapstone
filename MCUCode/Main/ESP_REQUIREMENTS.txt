@@ -1,0 +1,345 @@
+================================================================================
+ESP REQUIREMENTS — UART PROTOCOL WITH PICO
+Pill Dispenser Capstone Project
+================================================================================
+This document is the complete specification for an ESP firmware agent to
+implement the ESP side of the Pico↔ESP interface.  The Pico firmware is
+already fully built.  Read this entire file before writing any ESP code.
+
+================================================================================
+SECTION 0 — SYSTEM OVERVIEW
+================================================================================
+
+HARDWARE:
+  - Pico2 (RP2350) — executes dispenses, owns flash storage, runs motor/sensors
+  - ESP32 (or equivalent) — owns the user interface, NTP time, user notifications
+
+DATA OWNERSHIP (critical — do not violate these rules):
+  - Pill counts      → Pico is the ONLY source of truth.  Flash-persisted.
+                       ESP caches the count; corrects it on every STATUS/BOOT_SYNC.
+  - Medication data  → ESP is authoritative (NVS/LittleFS).  Re-sends to Pico on
+                       every boot/reconnect via LOAD_PROFILE.
+  - Current time     → ESP is authoritative (NTP).  Sends to Pico via SET_TIME.
+  - Dispense history → ESP logs every STATUS message received from Pico.
+
+DIVISION OF RESPONSIBILITIES:
+  Pico does:   motor control, sensor processing, dispense execution,
+               flash persistence, software RTC (time tracking only —
+               auto-scheduling engine not yet implemented; see Section 8)
+  ESP does:    user interface, NTP sync, profile management UI, notifications,
+               reconnect/resync logic
+
+TERMINOLOGY (use consistently on both sides):
+  Active slot   - Any slot with pill data loaded (slots 0–4, is_active=true).
+                  Multiple slots can be active simultaneously.
+  Selected slot - The single slot targeted by manual DISPENSE commands.
+                  One at a time; carries over between dispenses.
+                  Has no bearing on scheduled (auto) dispenses.
+  Slot numbers  - ALL messages use 0-indexed slot numbers (0–4).  Never 1-indexed.
+
+================================================================================
+SECTION 1 — PHYSICAL / UART SETTINGS
+================================================================================
+
+  Interface : Dedicated hardware UART (Pico UART1 — NOT the USB serial port)
+  Baud rate : 115200
+  Format    : 8N1, no hardware flow control
+  Pico TX   : GPIO 20  →  connect to ESP RX pin
+  Pico RX   : GPIO 21  →  connect to ESP TX pin
+  Line end  : \n  (Pico also accepts \r\n from ESP)
+  Max line  : 255 bytes including newline.  Longer lines are silently discarded.
+  Encoding  : ASCII only.  No binary frames.
+
+================================================================================
+SECTION 2 — MESSAGE FORMAT RULES
+================================================================================
+
+Commands (ESP → Pico):
+  CMD|action=<ACTION>|field=value|...\n
+
+Messages (Pico → ESP):
+  TYPE|field=value|...\n
+  Examples:  ACK|...\n   BOOT_SYNC|...\n   STATUS|...\n   TIME_REQ\n
+
+Rules:
+  - Fields are pipe-delimited key=value pairs.
+  - Field order does not matter within a line.
+  - Unknown fields are silently ignored by the Pico.
+  - All values are plain ASCII text (no quoting, no escaping).
+  - Medication names must not contain | or \n characters.
+
+================================================================================
+SECTION 3 — STARTUP / CONNECTION SEQUENCE
+================================================================================
+
+On every Pico boot the following happens automatically, in order:
+
+  1. Pico → ESP : TIME_REQ\n
+       ESP must respond IMMEDIATELY with CMD|action=SET_TIME|epoch=<n>\n.
+
+  2. Pico → ESP : one BOOT_SYNC line per active slot (slots 0–4 with data).
+       ESP must overwrite its cached pill count for each slot with left= value.
+       ESP must NOT send LOAD_PROFILE back in response to BOOT_SYNC.
+
+  3. After responding to TIME_REQ, ESP should send LOAD_PROFILE for all active
+     slots stored in NVS.  This ensures the Pico has current profile data even
+     after a flash wipe.
+     CAUTION: LOAD_PROFILE resets Pico pill count to total=.  Only send on
+     first setup or after a physical cartridge refill, not on every reconnect
+     unless you mirror the current pill count in total=.
+
+On ESP reconnect after being offline:
+  - Re-send SET_TIME immediately.
+  - If Pico also rebooted: expect fresh BOOT_SYNC messages.
+  - If Pico did NOT reboot: pill counts are valid from last STATUS.
+
+================================================================================
+SECTION 4 — COMMANDS: ESP SENDS TO PICO
+================================================================================
+
+------------------------------------------------------------------------
+4.1  SET_TIME
+------------------------------------------------------------------------
+Purpose : Sync the Pico's software RTC.  The Pico has NO battery-backed RTC.
+          Time is lost every power-cycle.  The Pico cannot auto-schedule
+          dispenses until it receives a valid SET_TIME.
+
+Format  : CMD|action=SET_TIME|epoch=<unix_ts>\n
+
+Fields:
+  epoch  - Unix timestamp (seconds since 1970-01-01 00:00:00 UTC). Must be > 0.
+
+Example:
+  CMD|action=SET_TIME|epoch=1744056000\n
+
+ACK from Pico:
+  ACK|action=SET_TIME|slot=0|result=ok\n
+  ACK|action=SET_TIME|slot=0|result=err_missing_epoch\n
+  ACK|action=SET_TIME|slot=0|result=err_invalid_epoch\n
+
+When to send:
+  - Immediately on connect / reconnect.
+  - Immediately when Pico sends TIME_REQ.
+  - Periodically to correct drift (once per hour is sufficient).
+
+------------------------------------------------------------------------
+4.2  LOAD_PROFILE
+------------------------------------------------------------------------
+Purpose : Store or overwrite a medication profile slot on the Pico (flash-persisted).
+          WARNING: resets Pico pills_remaining to total=<n> for that slot.
+          Only send during initial setup or after physical cartridge refill.
+
+Format  : CMD|action=LOAD_PROFILE|slot=<n>|med=<name>|total=<n>|dose=<n>|time=<ms>\n
+
+Fields:
+  slot      - 0 to 4
+  med       - Medication name, max 31 characters, no | or newline
+  total     - Total pills loaded into the physical cartridge (1–255)
+  dose      - Pills to dispense per dose (1–255)
+  time      - Motor run time per pill in milliseconds (typically 800–1200).
+              Used by legacy timed-dispense only; ignored by sensor-based
+              DISPENSE command.
+  schedule  - (OPTIONAL) Comma-separated HH:MM times (24h), up to 4 entries.
+              e.g. "08:00,20:00" → dispense at 08:00 and 20:00 every day.
+              Omitting this field clears any existing schedule on that slot.
+
+Examples:
+  CMD|action=LOAD_PROFILE|slot=0|med=Aspirin|total=20|dose=1|time=800\n
+  CMD|action=LOAD_PROFILE|slot=2|med=Metformin|total=60|dose=2|time=900|schedule=08:00,20:00\n
+
+ACK from Pico:
+  ACK|action=LOAD_PROFILE|slot=<n>|result=ok\n
+  ACK|action=LOAD_PROFILE|slot=<n>|result=err_missing_fields\n
+  ACK|action=LOAD_PROFILE|slot=<n>|result=err_invalid_slot\n
+
+ESP responsibilities:
+  - Store full profile in NVS/LittleFS (your own persistent storage).
+  - Validate before sending: slot 0-4, name not empty, total > 0, dose > 0.
+  - Do NOT send in response to BOOT_SYNC (would reset Pico pill count).
+
+------------------------------------------------------------------------
+4.3  DISPENSE
+------------------------------------------------------------------------
+Purpose : Trigger one immediate sensor-based dose dispense.
+          Equivalent to pressing 'F' on the Pico's USB terminal.
+
+Format  : CMD|action=DISPENSE\n
+          CMD|action=DISPENSE|slot=<n>\n
+
+Fields:
+  slot  - (OPTIONAL) 0–4. Switch to this slot before dispensing.
+           If omitted, Pico uses its currently selected slot.
+           Selection persists after the dispense.
+
+Examples:
+  CMD|action=DISPENSE\n                  (use current slot)
+  CMD|action=DISPENSE|slot=2\n           (switch to slot 2 then dispense)
+
+Response sequence from Pico (in this order):
+  1. STATUS message  (see Section 5.3) — sent before the ACK
+  2. ACK|action=DISPENSE|slot=<n>|result=<...>\n
+
+ACK results:
+  result=ok                   Piezo confirmed pill dispensed successfully.
+  result=fail                 Sensor timeout after 3 retries — no pill confirmed.
+  result=err_invalid_slot     Slot number out of range (0–4).
+  result=err_slot_not_active  Slot has no profile loaded.
+
+CRITICAL — TIMING:
+  DISPENSE is blocking on the Pico for up to ~35 seconds:
+    3 retries × 10s timeout + ~4s retry delay + 1s motor reverse = ~35s worst case.
+  The Pico will NOT process any other UART commands while dispensing.
+  Set ESP ACK timeout to >= 40 seconds.
+  Do NOT send another command until the DISPENSE ACK is received.
+
+ESP responsibilities:
+  - Wait for ACK before issuing any further commands.
+  - Update pill count from the STATUS message (not from ACK).
+  - Do NOT decrement pill count on result=fail.
+  - Notify user on fail.
+
+================================================================================
+SECTION 5 — MESSAGES: PICO SENDS TO ESP
+================================================================================
+
+------------------------------------------------------------------------
+5.1  TIME_REQ  (sent on every Pico boot; may repeat if time becomes stale)
+------------------------------------------------------------------------
+Format  : TIME_REQ\n
+
+Meaning : Pico needs current Unix time.
+
+ESP action:
+  - Respond IMMEDIATELY with CMD|action=SET_TIME|epoch=<ntp_epoch>\n
+  - Fetch a fresh NTP timestamp; do not use a cached/stale value.
+  - Handle TIME_REQ at any point during operation, not only during boot.
+
+------------------------------------------------------------------------
+5.2  BOOT_SYNC  (sent once per active slot, on every Pico boot)
+------------------------------------------------------------------------
+Format  : BOOT_SYNC|slot=<n>|med=<name>|left=<pills>|dose=<n>|doses=<n>|schedule=<times|none>\n
+
+Fields:
+  slot      - 0-indexed (0–4)
+  med       - Medication name
+  left      - Pills remaining (Pico flash value — authoritative source of truth)
+  dose      - Pills per dose
+  doses     - Full doses remaining (= left / dose, integer division)
+  schedule  - Comma-separated HH:MM times ("08:00,20:00") or literal "none"
+
+Examples:
+  BOOT_SYNC|slot=0|med=Aspirin|left=18|dose=1|doses=18|schedule=none\n
+  BOOT_SYNC|slot=2|med=Metformin|left=55|dose=2|doses=27|schedule=08:00,20:00\n
+
+ESP action:
+  - Overwrite your stored pill count for each slot with left= value.
+  - Update schedule display if changed.
+  - Do NOT send LOAD_PROFILE in response.
+  - Any slot not mentioned in BOOT_SYNC is currently inactive (no profile).
+
+------------------------------------------------------------------------
+5.3  STATUS  (sent after every dispense attempt — success or failure)
+------------------------------------------------------------------------
+Format  : STATUS|slot=<n>|med=<name>|left=<pills>|dose=<n>|doses=<n>|last=<ts>|event=<text>|result=<ok|fail>|notes=<text>\n
+
+Fields:
+  slot    - 0-indexed (0–4)
+  med     - Medication name
+  left    - Pills remaining AFTER this event
+  dose    - Pills per dose
+  doses   - Full doses remaining after this event
+  last    - Pico uptime at time of event, format: "uptime HH:MM:SS"
+  event   - See table below
+  result  - "ok" or "fail"
+  notes   - Detail string
+
+Event values:
+  "Dispense complete"    result="ok"    All pills in dose confirmed by sensors
+  "Dispense incomplete"  result="fail"  Some pills failed to dispense
+  "Dispense rejected"    result="fail"  Not enough pills remaining for a full dose
+
+Example:
+  STATUS|slot=0|med=Aspirin|left=17|dose=1|doses=17|last=uptime 00:03:14|event=Dispense complete|result=ok|notes=Sensor dispense completed\n
+
+ESP action:
+  - Log every STATUS to dispense history with your own timestamp.
+  - Update cached pill count for the slot from left= value.
+  - Refresh UI pill count display.
+  - Notify user on result="fail" or low pill count.
+
+------------------------------------------------------------------------
+5.4  ACK  (sent in response to every CMD received from ESP)
+------------------------------------------------------------------------
+Format  : ACK|action=<ACTION>|slot=<n>|result=<ok|err_...>\n
+
+All result codes are listed under each command in Section 4.
+
+ESP action:
+  - Treat any result != "ok" as an error: log, retry, or alert user.
+  - For DISPENSE: STATUS arrives before the ACK.
+
+================================================================================
+SECTION 6 — ESP-SIDE DATA MODEL
+================================================================================
+
+Maintain the following in NVS or LittleFS:
+
+  Per slot (0–4):
+    medication_name   string (max 31 chars)
+    total_pills       uint8  (what was physically loaded — for LOAD_PROFILE resend)
+    dose              uint8
+    time_ms           uint32
+    schedule_times[]  up to 4 "HH:MM" strings
+    cached_pills_left uint8  (mirror of Pico, corrected by STATUS/BOOT_SYNC)
+    is_active         bool
+
+  Dispense history log (per entry):
+    slot              uint8
+    medication_name   string
+    esp_timestamp     unix epoch from ESP NTP clock
+    result            "ok" or "fail"
+    pills_left_after  uint8
+    event             string
+
+================================================================================
+SECTION 7 — COMPLETE BOOT SEQUENCE EXAMPLE
+================================================================================
+
+Slot 0: Aspirin loaded, 18 pills remaining, no schedule.
+Slot 2: Metformin loaded, 55 pills remaining, schedule 08:00 and 20:00.
+
+  --- Pico boots ---
+  Pico  →  ESP : TIME_REQ\n
+  ESP   →  Pico: CMD|action=SET_TIME|epoch=1744056000\n
+  Pico  →  ESP : ACK|action=SET_TIME|slot=0|result=ok\n
+  Pico  →  ESP : BOOT_SYNC|slot=0|med=Aspirin|left=18|dose=1|doses=18|schedule=none\n
+  Pico  →  ESP : BOOT_SYNC|slot=2|med=Metformin|left=55|dose=2|doses=27|schedule=08:00,20:00\n
+
+  ESP updates cached pill counts (slot 0 = 18, slot 2 = 55).
+
+  --- User presses Dispense on ESP UI for slot 0 ---
+  ESP   →  Pico: CMD|action=DISPENSE|slot=0\n
+  (Pico runs motor + sensors — up to ~35 seconds)
+  Pico  →  ESP : STATUS|slot=0|med=Aspirin|left=17|dose=1|doses=17|last=uptime 00:00:42|event=Dispense complete|result=ok|notes=Sensor dispense completed\n
+  Pico  →  ESP : ACK|action=DISPENSE|slot=0|result=ok\n
+  ESP updates slot 0 pill count to 17 and logs event.
+
+================================================================================
+SECTION 8 — FUTURE / NOT YET IMPLEMENTED ON PICO
+================================================================================
+
+Do not implement or send these until Pico firmware is updated.
+
+  CMD|action=SET_SCHEDULE|slot=<n>|...
+      Modify a schedule without re-sending a full LOAD_PROFILE.
+
+  ALERT|type=low_pills|slot=<n>|med=<name>|left=<n>
+      Pico proactively notifies ESP when pills drop below a threshold.
+
+  ALERT|type=dispense_failed|slot=<n>
+      Pico notifies ESP when all retries are exhausted.
+
+================================================================================
+END OF FILE
+================================================================================
+

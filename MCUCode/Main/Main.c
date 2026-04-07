@@ -15,7 +15,10 @@
 #include "pill_dispenser.h"
 #include "sensor_interrupts.h"
 #include "stepper_control.h"
+#include "esp_uart.h"
+#include "pico_rtc.h"
 #include <stdio.h>
+#include <stdlib.h>
 
 // Sensor callback functions
 void on_piezo_detected(void) {
@@ -41,7 +44,10 @@ int main() {
     // Initialize stdio for keyboard input
     stdio_init_all();
     
-    // Initialize pill dispenser system (includes motor init)
+    // Initialize software RTC (time cleared — will request from ESP)
+    rtc_init_module();
+    
+    // Initialize pill dispenser system (includes motor init and ESP UART init)
     dispenser_init();
 
     // Initialize stepper motor
@@ -56,16 +62,19 @@ int main() {
     ir_set_callback(on_ir_detected);
     
     // Load test profiles for prototyping
-    dispenser_load_profile_to_slot(PROFILE_VITAMIN_D, "Vitamin D", 15, 2, 1000); // 15 pills, 2 per dose, 1 second per pill
-    dispenser_load_profile_to_slot(PROFILE_ASPIRIN, "Aspirin", 20, 1, 800);     // 20 pills, 1 per dose, 0.8 seconds per pill
+    // (profiles are now restored from flash automatically in dispenser_init)
+    // dispenser_switch_to_profile is only needed if flash had a valid active slot
     
-    // Start with Vitamin D as active profile
-    dispenser_switch_to_profile(PROFILE_VITAMIN_D);
-    
+    // Request current time from ESP (no battery-backed RTC on Pico2)
+    rtc_request_from_esp();
+    uint64_t last_time_req_us = time_us_64();
+
     printf("\n=== PILL DISPENSER PROTOTYPE ===\n");
     printf("Commands:\n");
     printf("D - Dispense dose (timed)\n");
     printf("F - Dispense dose (sensor feedback)\n");
+    printf("M - Manual load profile (enter command via terminal)\n");
+    printf("K - Show / set time\n");
     printf("S - Show status\n");
     printf("L - List all profiles\n");
     printf("B - Simulate button press\n");
@@ -108,6 +117,93 @@ int main() {
                 case 'F':
                     dispenser_execute_dose_sensor_based();
                     break;
+
+                case 'm':
+                case 'M': {
+                    printf("Enter profile command (10s timeout):\n");
+                    printf("Format: CMD|action=LOAD_PROFILE|slot=<0-2>|med=<name>|total=<n>|dose=<n>|time=<ms>\n> ");
+                    char line_buf[256];
+                    int pos = 0;
+                    int ch;
+                    while (pos < (int)sizeof(line_buf) - 1) {
+                        ch = getchar_timeout_us(10000000); // 10s per character
+                        if (ch == PICO_ERROR_TIMEOUT) {
+                            if (pos > 0) {
+                                printf("\n"); // treat timeout as Enter if buffer has content
+                            } else {
+                                printf("\nTimeout — no input received, command cancelled.\n");
+                                pos = 0;
+                            }
+                            break;
+                        }
+                        if (ch == '\n' || ch == '\r') {
+                            printf("\n");
+                            break;
+                        }
+                        printf("%c", (char)ch); // echo back
+                        line_buf[pos++] = (char)ch;
+                    }
+                    line_buf[pos] = '\0';
+                    if (pos > 0) {
+                        esp_uart_inject_line(line_buf);
+                    }
+                    break;
+                }
+
+                case 'k':
+                case 'K': {
+                    char time_buf[32];
+                    rtc_get_time_str(time_buf, sizeof(time_buf));
+                    printf("Current time : %s\n", time_buf);
+                    if (rtc_is_set()) {
+                        uint16_t mod = rtc_get_minutes_of_day();
+                        printf("Minutes today: %u (%02u:%02u)\n",
+                               (unsigned)mod, (unsigned)(mod / 60), (unsigned)(mod % 60));
+                    }
+                    printf("Enter new time (YYYY-MM-DD HH:MM:SS or epoch integer, 10s timeout, Enter to skip):\n> ");
+                    char time_input[32];
+                    int tpos = 0;
+                    int tch;
+                    while (tpos < (int)sizeof(time_input) - 1) {
+                        tch = getchar_timeout_us(10000000);
+                        if (tch == PICO_ERROR_TIMEOUT) {
+                            break; // skip silently
+                        }
+                        if (tch == '\n' || tch == '\r') {
+                            printf("\n");
+                            break;
+                        }
+                        printf("%c", (char)tch);
+                        time_input[tpos++] = (char)tch;
+                    }
+                    time_input[tpos] = '\0';
+                    if (tpos > 0) {
+                        // Pure digits → treat as Unix epoch directly
+                        bool all_digits = true;
+                        for (int i = 0; i < tpos; i++) {
+                            if (time_input[i] < '0' || time_input[i] > '9') {
+                                all_digits = false;
+                                break;
+                            }
+                        }
+                        uint32_t epoch = 0;
+                        if (all_digits) {
+                            epoch = (uint32_t)strtoul(time_input, NULL, 10);
+                        } else {
+                            epoch = rtc_parse_datetime_str(time_input);
+                        }
+                        if (epoch > 0) {
+                            rtc_set_epoch(epoch);
+                            rtc_get_time_str(time_buf, sizeof(time_buf));
+                            printf("Time updated: %s\n", time_buf);
+                        } else {
+                            printf("Invalid format. Use YYYY-MM-DD HH:MM:SS or a Unix epoch integer.\n");
+                        }
+                    } else {
+                        printf("Time unchanged.\n");
+                    }
+                    break;
+                }
                     
                 case 's':
                 case 'S':
@@ -246,6 +342,18 @@ int main() {
             }
         }
         
+        // Poll ESP UART for incoming commands
+        esp_uart_poll();
+
+        // Retry TIME_REQ every 15 seconds until ESP responds with a valid time
+        if (!rtc_is_set()) {
+            uint64_t now_us = time_us_64();
+            if (now_us - last_time_req_us >= 15000000ULL) {
+                rtc_request_from_esp();
+                last_time_req_us = now_us;
+            }
+        }
+
         // Advance stepper motor one half-step if due
         stepper_task();
 

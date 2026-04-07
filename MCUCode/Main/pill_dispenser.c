@@ -3,18 +3,13 @@
  */
 
 #include "pill_dispenser.h"
+#include "pico_storage.h"
 #include "sensor_interrupts.h"
 #include "hardware/gpio.h"
-#include "hardware/uart.h"
 #include "pico/stdlib.h"
 #include "pico/time.h"
 #include <stdio.h>
 #include <string.h>
-
-#define ESP_UART uart1
-#define ESP_UART_BAUD 115200
-#define ESP_UART_TX_PIN 20
-#define ESP_UART_RX_PIN 21
 
 static dispense_profile_t profiles[MAX_PROFILES];
 static int8_t current_profile_slot = -1;
@@ -53,7 +48,7 @@ static void send_status_update(const dispense_profile_t *profile,
     length = snprintf(line,
                       sizeof(line),
                       "STATUS|slot=%d|med=%s|left=%d|dose=%d|doses=%lu|last=%s|event=%s|result=%s|notes=%s\n",
-                      (int)profile_slot + 1,
+                      (int)profile_slot,
                       profile->medication_name,
                       profile->pills_remaining,
                       profile->pills_per_dose,
@@ -84,9 +79,58 @@ void dispenser_init(void) {
         profiles[i].is_active = false;
     }
     current_profile_slot = -1;
-    
+
+    // Attempt to restore slots 0-2 from flash
+    if (flash_profiles_load(profiles)) {
+        for (int i = 0; i < FLASH_PROFILE_SLOT_COUNT; i++) {
+            if (profiles[i].is_active) {
+                printf("  Restored slot %d: %s (%d pills)\n",
+                       i, profiles[i].medication_name, profiles[i].pills_remaining);
+                if (current_profile_slot < 0) {
+                    current_profile_slot = i;
+                }
+            }
+        }
+    } else {
+        printf("  No saved profiles — use 'M' command or ESP LOAD_PROFILE to add profiles\n");
+    }
+
     printf("Pill Dispenser System Initialized\n");
     printf("Profile slots available: %d\n", MAX_PROFILES);
+
+    // Broadcast all active slots to the ESP so it can sync its own records
+    for (int i = 0; i < FLASH_PROFILE_SLOT_COUNT; i++) {
+        if (profiles[i].is_active) {
+            char line[320];
+            uint32_t doses = profiles[i].pills_per_dose > 0
+                ? profiles[i].pills_remaining / profiles[i].pills_per_dose
+                : 0;
+            // Build schedule string e.g. "08:00,20:00" (empty string if no schedule)
+            char sched_str[48] = "none";
+            if (profiles[i].schedule_count > 0) {
+                int spos = 0;
+                for (uint8_t s = 0; s < profiles[i].schedule_count && spos < (int)sizeof(sched_str) - 6; s++) {
+                    if (s > 0) sched_str[spos++] = ',';
+                    spos += snprintf(sched_str + spos, sizeof(sched_str) - spos,
+                                     "%02u:%02u",
+                                     profiles[i].schedule_times_mins[s] / 60,
+                                     profiles[i].schedule_times_mins[s] % 60);
+                }
+            }
+            int len = snprintf(line, sizeof(line),
+                "BOOT_SYNC|slot=%d|med=%s|left=%d|dose=%d|doses=%lu|schedule=%s\n",
+                i,
+                profiles[i].medication_name,
+                profiles[i].pills_remaining,
+                profiles[i].pills_per_dose,
+                (unsigned long)doses,
+                sched_str);
+            if (len > 0) {
+                uart_write_blocking(ESP_UART, (const uint8_t *)line, (size_t)len);
+                printf("[ESP TX] %s", line);
+            }
+        }
+    }
 }
 
 void dispenser_load_profile_to_slot(uint8_t slot, const char* med_name, uint8_t total_pills, uint8_t per_dose, uint32_t time_per_pill) {
@@ -101,10 +145,47 @@ void dispenser_load_profile_to_slot(uint8_t slot, const char* med_name, uint8_t 
     profiles[slot].pills_per_dose = per_dose;
     profiles[slot].dispense_time_ms = time_per_pill;
     profiles[slot].is_active = true;
-    
+    // Clear schedule on profile load; use dispenser_set_profile_schedule to set it
+    profiles[slot].schedule_count = 0;
+    memset(profiles[slot].schedule_times_mins, 0, sizeof(profiles[slot].schedule_times_mins));
+
     printf("Profile loaded to slot %d: %s\n", slot, med_name);
-    printf("Total Pills: %d, Per Dose: %d, Time per Pill: %dms\n", 
+    printf("Total Pills: %d, Per Dose: %d, Time per Pill: %dms\n",
            total_pills, per_dose, time_per_pill);
+
+    // Auto-select this slot for manual commands if nothing is currently selected
+    if (current_profile_slot < 0) {
+        current_profile_slot = slot;
+        printf("Slot %d auto-selected for manual commands\n", slot);
+    }
+
+    // Persist to flash immediately
+    if (slot < FLASH_PROFILE_SLOT_COUNT) {
+        flash_profiles_save(profiles);
+    }
+}
+
+void dispenser_set_profile_schedule(uint8_t slot, const uint16_t *times_mins, uint8_t count) {
+    if (slot >= MAX_PROFILES || !profiles[slot].is_active) {
+        printf("ERROR: dispenser_set_profile_schedule: invalid or inactive slot %d\n", slot);
+        return;
+    }
+    if (count > MAX_DOSES_PER_DAY) {
+        count = MAX_DOSES_PER_DAY;
+    }
+    profiles[slot].schedule_count = count;
+    memcpy(profiles[slot].schedule_times_mins, times_mins, count * sizeof(uint16_t));
+
+    printf("Schedule set for slot %d (%d time(s)):\n", slot, count);
+    for (uint8_t i = 0; i < count; i++) {
+        printf("  %02u:%02u\n",
+               profiles[slot].schedule_times_mins[i] / 60,
+               profiles[slot].schedule_times_mins[i] % 60);
+    }
+
+    if (slot < FLASH_PROFILE_SLOT_COUNT) {
+        flash_profiles_save(profiles);
+    }
 }
 
 bool dispenser_switch_to_profile(uint8_t slot) {
@@ -119,8 +200,8 @@ bool dispenser_switch_to_profile(uint8_t slot) {
     }
     
     current_profile_slot = slot;
-    printf("Switched to profile slot %d: %s\n", slot, profiles[slot].medication_name);
-    printf("Pills remaining: %d, Pills per dose: %d\n", 
+    printf("Selected slot %d for manual commands: %s\n", slot, profiles[slot].medication_name);
+    printf("Pills remaining: %d, Pills per dose: %d\n",
            profiles[slot].pills_remaining, profiles[slot].pills_per_dose);
     return true;
 }
@@ -134,19 +215,31 @@ void dispenser_list_all_profiles(void) {
     for (int i = 0; i < MAX_PROFILES; i++) {
         printf("Slot %d: ", i);
         if (profiles[i].is_active) {
-            printf("%s - %d pills, %d per dose", 
-                   profiles[i].medication_name, 
-                   profiles[i].pills_remaining, 
+            printf("%s - %d pills, %d per dose",
+                   profiles[i].medication_name,
+                   profiles[i].pills_remaining,
                    profiles[i].pills_per_dose);
+            if (profiles[i].schedule_count > 0) {
+                printf(" [SCHEDULED: ");
+                for (uint8_t s = 0; s < profiles[i].schedule_count; s++) {
+                    if (s > 0) printf(",");
+                    printf("%02u:%02u",
+                           profiles[i].schedule_times_mins[s] / 60,
+                           profiles[i].schedule_times_mins[s] % 60);
+                }
+                printf("]");
+            } else {
+                printf(" [MANUAL ONLY]");
+            }
             if (i == current_profile_slot) {
-                printf(" [ACTIVE]");
+                printf(" <-- selected");
             }
             printf("\n");
         } else {
             printf("[EMPTY]\n");
         }
     }
-    printf("==================\n\n");
+    printf("===================\n\n");
 }
 
 void dispenser_load_profile(const char* med_name, uint8_t total_pills, uint8_t per_dose, uint32_t time_per_pill) {
@@ -202,21 +295,57 @@ bool dispenser_execute_dose(void) {
 
 void dispenser_get_status(void) {
     if (current_profile_slot < 0 || !profiles[current_profile_slot].is_active) {
-        printf("No active medication profile selected\n");
+        printf("No slot selected for manual commands\n");
         dispenser_list_all_profiles();
         return;
     }
-    
+
     dispense_profile_t* profile = &profiles[current_profile_slot];
-    
-    printf("\n=== CURRENT PROFILE STATUS ===\n");
-    printf("Active Slot: %d\n", current_profile_slot);
+
+    printf("\n=== STATUS ===\n");
+    printf("Selected Slot: %d (target for manual dispense commands)\n", current_profile_slot);
     printf("Medication: %s\n", profile->medication_name);
     printf("Pills Remaining: %d\n", profile->pills_remaining);
     printf("Pills per Dose: %d\n", profile->pills_per_dose);
-    printf("Possible Doses Remaining: %d\n", 
+    printf("Possible Doses Remaining: %d\n",
            profile->pills_remaining / profile->pills_per_dose);
-    printf("=============================\n\n");
+    if (profile->schedule_count > 0) {
+        printf("Schedule: ");
+        for (uint8_t i = 0; i < profile->schedule_count; i++) {
+            if (i > 0) printf(", ");
+            printf("%02u:%02u",
+                   profile->schedule_times_mins[i] / 60,
+                   profile->schedule_times_mins[i] % 60);
+        }
+        printf("\n");
+    } else {
+        printf("Schedule: none\n");
+    }
+    printf("==============\n");
+
+    // Also show summary of all loaded slots
+    printf("\n--- All Slots ---\n");
+    for (int i = 0; i < MAX_PROFILES; i++) {
+        if (profiles[i].is_active) {
+            if (profiles[i].schedule_count > 0) {
+                printf("  Slot %d: %s — %d pills [SCHEDULED]",
+                       i, profiles[i].medication_name, profiles[i].pills_remaining);
+                printf(" ");
+                for (uint8_t s = 0; s < profiles[i].schedule_count; s++) {
+                    if (s > 0) printf(",");
+                    printf("%02u:%02u",
+                           profiles[i].schedule_times_mins[s] / 60,
+                           profiles[i].schedule_times_mins[s] % 60);
+                }
+            } else {
+                printf("  Slot %d: %s — %d pills [MANUAL ONLY]",
+                       i, profiles[i].medication_name, profiles[i].pills_remaining);
+            }
+            if (i == current_profile_slot) printf(" <-- selected");
+            printf("\n");
+        }
+    }
+    printf("-----------------\n");
 }
 
 uint8_t dispenser_get_remaining_pills(void) {

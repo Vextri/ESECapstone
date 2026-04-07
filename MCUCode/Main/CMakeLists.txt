@@ -35,7 +35,7 @@ pico_sdk_init()
 
 # Add executable. Default name is the project name, version 0.1
 
-add_executable(Main Main.c motor_control.c pill_dispenser.c sensor_interrupts.c stepper_control.c)
+add_executable(Main Main.c motor_control.c pill_dispenser.c sensor_interrupts.c stepper_control.c esp_uart.c pico_storage.c pico_rtc.c)
 
 pico_set_program_name(Main "Main")
 pico_set_program_version(Main "0.1")
@@ -49,7 +49,9 @@ target_link_libraries(Main
         pico_stdlib
         hardware_pwm
     hardware_gpio
-    hardware_uart)
+    hardware_uart
+    hardware_flash
+    hardware_sync)
 
 # Add the standard include files to the build
 target_include_directories(Main PRIVATE
