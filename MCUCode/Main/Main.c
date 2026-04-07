@@ -24,8 +24,7 @@ void on_piezo_detected(void) {
 }
 
 void on_hall_effect_detected(void) {
-    printf(">>> HALL EFFECT: HIGH->LOW detected, stopping motor <<<\n");
-    motor_stop();
+    printf(">>> HALL EFFECT: HIGH->LOW detected <<<\n");
 }
 
 void on_ir_detected(void) {

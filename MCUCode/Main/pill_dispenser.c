@@ -246,9 +246,10 @@ void dispenser_test_mode(void) {
 bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms) {
     printf("Starting sensor-based pill dispense (timeout: %dms)...\n", timeout_ms);
 
-    // Ensure piezo and IR are enabled
+    // Ensure piezo, IR, and hall effect are enabled
     if (!piezo_is_enabled()) piezo_enable();
     if (!ir_is_enabled()) ir_enable();
+    if (!hall_effect_is_enabled()) hall_effect_enable();
 
     const int MAX_RETRIES = 3;
 
@@ -265,6 +266,7 @@ bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms) {
         // Reset counts before each attempt so only new events count
         piezo_reset_count();
         ir_reset_count();
+        hall_effect_reset_count();
 
         uint32_t start_time = to_ms_since_boot(get_absolute_time());
 
@@ -294,6 +296,9 @@ bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms) {
         // Wait for IR interrupt to register - piezo and IR fire near-simultaneously
         // so we need enough time for the IRQ handler to increment the count
         sleep_ms(300);
+
+        uint32_t hall_triggers = hall_effect_get_count();
+        printf("Hall effect triggers for this pill: %lu\n", (unsigned long)hall_triggers);
 
         // IR confirms pill passed through chute
         bool ir_ok = ir_get_count() > 0;
