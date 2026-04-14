@@ -26,7 +26,7 @@
 static const char *TAG = "time_server";
 
 #define AP_SSID "ESP-Time-Server"
-#define AP_PASS "1"
+#define AP_PASS "12345678"
 #define AP_MAX_CONN 4
 
 #define DNS_PORT 53
@@ -1385,6 +1385,7 @@ static void start_webserver(void)
 	config.max_uri_handlers = 14;
 	config.stack_size = 10240;
 	config.uri_match_fn = httpd_uri_match_wildcard;
+	config.max_open_sockets = 4; // Reserve sockets for DNS + lwIP internals (total lwIP sockets = 10)
 
 	if (httpd_start(&server, &config) == ESP_OK) {
 		httpd_uri_t root = {

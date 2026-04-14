@@ -1,8 +1,8 @@
 ================================================================================
                     PILL DISPENSER SYSTEM - FEATURE DOCUMENTATION
 ================================================================================
-Date: March 26, 2026
-Platform: Raspberry Pi Pico 2 (ARM Cortex-M33)
+Date: April 9, 2026
+Platform: Raspberry Pi Pico 2 (RP2350, ARM Cortex-M33)
 SDK: Pico SDK 2.2.0
 Build System: CMake + Ninja
 

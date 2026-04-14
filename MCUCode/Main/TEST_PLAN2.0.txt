@@ -1,0 +1,516 @@
+================================================================================
+  PILL DISPENSER - SYSTEM TEST PLAN v2.0
+  Project: Conestoga Capstone - Pill Dispenser (RP2350)
+  Date: April 9, 2026
+================================================================================
+
+OVERVIEW
+--------
+This document covers manual test procedures for the complete Pico firmware as
+of April 9, 2026.  Tests are grouped by subsystem.  All tests are performed
+over USB serial at 115200 baud unless stated otherwise.
+
+Notation:
+  Send 'X'   means type the character X and press Enter (or just X if single char)
+  ->         means "expect this output on serial"
+  ESP cmd    means inject via terminal M command or send from a live ESP
+
+Prerequisites for all tests:
+  - Pico flashed with latest build
+  - USB serial terminal open at 115200 baud
+  - Sensors physically connected (GPIO 5 piezo, GPIO 6 hall, GPIO 7 IR)
+  - DC motor and stepper motor connected
+
+================================================================================
+SECTION 1 - PIEZO SENSOR
+================================================================================
+
+--- TEST P-01: Enable/Disable Toggle ---
+Steps:
+  1. Send 'T'   -> piezo shows DISABLED, count = 0
+  2. Send 'P'   -> piezo enabled
+  3. Send 'T'   -> piezo shows ENABLED
+  4. Tap piezo lightly
+  5. Send 'T'   -> count >= 1
+  6. Send 'P'   -> piezo disabled
+  7. Tap piezo again
+  8. Send 'T'   -> count unchanged
+Pass: Count increments only while enabled.
+
+--- TEST P-02: Interrupt on Impact ---
+Steps:
+  1. Send 'P' to enable, 'R' to reset counts
+  2. Drop a small object onto piezo from ~2 cm
+  -> Serial prints: ">>> PIEZO INTERRUPT! ..."
+  3. Send 'T'   -> count >= 1
+Pass: Interrupt fires and count increments.
+
+--- TEST P-03: Debounce (PIEZO_DEBOUNCE_MS = 100 ms) ---
+Steps:
+  1. Send 'R' to reset
+  2. Tap piezo rapidly 5 times within 100 ms
+  3. Send 'T'
+Pass: Count is 1 or 2 (not 5) — debounce filtered repeated triggers.
+
+--- TEST P-04: No False Triggers at Rest ---
+Steps:
+  1. Enable piezo, reset counts
+  2. Wait 30 seconds, no physical disturbance
+  3. Send 'T'
+Pass: Count remains 0.
+
+================================================================================
+SECTION 2 - IR SENSOR
+================================================================================
+
+--- TEST I-01: Enable/Disable Toggle ---
+Steps:
+  1. Send 'T'   -> IR shows DISABLED
+  2. Send 'I'   -> IR enabled
+  3. Break beam with finger; send 'T'   -> count >= 1
+  4. Send 'I'   -> IR disabled
+  5. Break beam again; send 'T'   -> count unchanged
+Pass: Count increments only while enabled.
+
+--- TEST I-02: Beam Break and Restore ---
+Steps:
+  1. Enable IR, reset counts
+  2. Block the IR beam with a finger (hold)
+  -> "IR SENSOR: Beam BROKEN!"
+  3. Remove finger
+  -> "IR SENSOR: Beam RESTORED!"
+  4. Send 'T'   -> count = 2
+Pass: Both edges reported, count = 2.
+
+--- TEST I-03: Debounce (IR_DEBOUNCE_MS = 50 ms) ---
+Steps:
+  1. Enable IR, reset counts
+  2. Wave a toothpick through the beam very rapidly (< 50 ms)
+  3. Send 'T'
+Pass: Count is 1, not 3 or more.
+
+--- TEST I-04: No False Triggers at Rest ---
+Steps:
+  1. Enable IR with clear beam, reset counts
+  2. Wait 60 seconds
+  3. Send 'T'
+Pass: Count = 0 (no ambient light interference).
+
+================================================================================
+SECTION 3 - HALL EFFECT SENSOR
+================================================================================
+
+--- TEST H-01: Enable/Disable Toggle ---
+Steps:
+  1. Send 'T'   -> hall shows DISABLED
+  2. Send 'H'   -> hall enabled
+  3. Pass magnet near sensor; send 'T'   -> count >= 1
+  4. Send 'H'   -> hall disabled
+  5. Pass magnet again; send 'T'   -> count unchanged
+Pass: Count increments only while enabled.
+
+--- TEST H-02: Falling Edge Trigger Only ---
+Steps:
+  1. Enable hall, reset counts
+  2. Slowly approach sensor with magnet
+  -> "HALL EFFECT: FALLING edge (HIGH->LOW), Count: 1"
+  3. Remove magnet; send 'T'
+Pass: Count = 1 on approach only (falling edge, not rising).
+
+--- TEST H-03: No False Triggers Without Magnet ---
+Steps:
+  1. Enable hall, reset counts
+  2. Wait 30 seconds, no magnet nearby
+  3. Send 'T'
+Pass: Count = 0.
+
+================================================================================
+SECTION 4 - SENSOR UTILITIES
+================================================================================
+
+--- TEST U-01: Reset All Counts ---
+Steps:
+  1. Trigger each sensor at least once (piezo tap, IR break, hall magnet)
+  2. Send 'T'   -> all counts > 0
+  3. Send 'R'
+  4. Send 'T'   -> all counts = 0
+Pass: All counters reset to 0.
+
+--- TEST U-02: GPIO Snapshot (G command) ---
+Steps:
+  1. Send 'G'   -> prints raw HIGH/LOW for GPIO 5, 6, 7
+  2. Block IR beam manually
+  3. Send 'G'   -> GPIO 7 changed state
+Pass: Raw GPIO reflects physical sensor state.
+
+--- TEST U-03: Continuous Monitor (V command) ---
+Steps:
+  1. Send 'V'   -> continuous output starts at ~5 Hz
+  2. Trigger each sensor in turn; observe state changes in output
+  3. Press any key   -> monitor exits cleanly
+Pass: Real-time updates visible, exits on keypress.
+
+--- TEST U-04: Interrupt Config Debug (C command) ---
+Steps:
+  1. Send 'C'
+  -> Prints GPIO config, pull resistor state, IRQ enable status for all 3 sensors
+Pass: No "error" or "misconfigured" lines in output.
+
+================================================================================
+SECTION 5 - DC MOTOR (MANUAL CONTROL)
+================================================================================
+
+--- TEST M-01: Forward / Stop ---
+Steps:
+  1. Send 'W'   -> motor spins forward
+  2. Send 'X'   -> motor stops immediately
+Pass: Motor responds to both commands.
+
+--- TEST M-02: Backward ---
+Steps:
+  1. Send 'N'   -> motor spins in reverse direction
+  2. Send 'X'   -> motor stops
+Pass: Motor reverses direction.
+
+================================================================================
+SECTION 6 - STEPPER MOTOR
+================================================================================
+
+--- TEST S-01: Forward Continuous ---
+Steps:
+  1. Send 'A'   -> stepper begins stepping forward continuously
+  2. Wait 2 seconds; observe steps in output
+  3. Send 'E'   -> stepper stops; prints step count
+Pass: Steps counted, stops cleanly.
+
+--- TEST S-02: Backward Continuous ---
+Steps:
+  1. Send 'Z'   -> stepper steps in reverse
+  2. Send 'E'   -> stops and prints step count
+Pass: Direction reversed, count correct.
+
+--- TEST S-03: Non-Blocking in Main Loop ---
+Steps:
+  1. Send 'A' to start stepper
+  2. While stepper is running, type 'T' (sensor status)
+  -> Sensor status prints without stepper stopping
+Pass: Stepper continues while other commands are processed.
+
+================================================================================
+SECTION 7 - PROFILE SYSTEM AND FLASH PERSISTENCE
+================================================================================
+
+--- TEST PR-01: Load Profile via Terminal (M command) ---
+Steps:
+  1. Send 'M'
+  2. At prompt, enter:
+     CMD|action=LOAD_PROFILE|slot=0|med=TestMed|total=10|dose=1|time=800
+  -> "ACK|action=LOAD_PROFILE|slot=0|result=ok"
+  3. Send 'L'   -> slot 0 shows TestMed, 10 pills, 1 per dose
+Pass: Profile loaded and reflected in slot list.
+
+--- TEST PR-02: Flash Persistence Across Reboot ---
+Precondition: At least one profile loaded (e.g. PR-01 above).
+Steps:
+  1. Power-cycle the Pico (unplug and replug USB)
+  2. Reconnect serial
+  3. Send 'L'
+Pass: Profile from before reboot is still present in slot 0.
+
+--- TEST PR-03: BOOT_SYNC Sent on Boot ---
+Steps:
+  1. With a profile loaded in at least one slot, power-cycle Pico
+  2. Observe serial output during boot
+  -> "BOOT_SYNC|slot=0|med=...|left=...|dose=...|doses=...|schedule=..."
+Pass: One BOOT_SYNC line per active slot printed during boot.
+
+--- TEST PR-04: Profile Switch ---
+Steps:
+  1. Load profiles into slot 0 (Vitamin D) and slot 1 (Aspirin) using M command
+  2. Send '1'   -> active profile shows Vitamin D
+  3. Send 'S'   -> confirms slot 0 active
+  4. Send '2'   -> active profile shows Aspirin
+  5. Send 'S'   -> confirms slot 1 active
+Pass: Profile switches correctly.
+
+--- TEST PR-05: Schedule Stored and Persists ---
+Steps:
+  1. Send 'M' and inject:
+     CMD|action=LOAD_PROFILE|slot=2|med=Metformin|total=60|dose=2|time=900|schedule=08:00,20:00
+  -> ACK result=ok
+  2. Send 'L'   -> slot 2 shows schedule: 08:00, 20:00
+  3. Power-cycle
+  4. Send 'L'   -> slot 2 schedule still present
+Pass: Schedule stored in profile and survives power cycle.
+
+================================================================================
+SECTION 8 - SENSOR-BASED DISPENSE (F COMMAND)
+================================================================================
+
+--- TEST F-01: No Active Profile ---
+Precondition: No profile selected (fresh boot with empty flash).
+Steps:
+  1. Send 'F'
+  -> "ERROR: No active dispense profile selected!"
+Pass: Error printed, motor does not run.
+
+--- TEST F-02: Insufficient Pills ---
+Precondition: Profile with pills_remaining < pills_per_dose.
+Steps:
+  1. Load profile with total=1, dose=2 via M command
+  2. Send '1' to select it, then 'F'
+  -> "ERROR: Insufficient pills remaining (2 needed, 1 available)"
+Pass: Error printed, motor does not run.
+
+--- TEST F-03: Successful Single-Pill Dispense ---
+Precondition: Profile loaded, pill physically in dispenser, sensors positioned.
+Steps:
+  1. Send 'R' to reset counts
+  2. Send 'F'
+  -> "Motor starting (attempt 1)..."
+  -> Piezo fires   -> "Pill impact detected - motor stopped."
+  -> IR fires within 300 ms window
+  -> "Pill check: Piezo=TRIGGERED | IR=TRIGGERED"
+  -> "SUCCESS: Pill confirmed dispensed!"
+  -> "Dose complete!"
+  3. Send 'S'   -> pills_remaining decremented by 1
+  -> STATUS line sent over UART1: "STATUS|slot=0|...result=ok..."
+Pass: Both sensors triggered, count decremented, STATUS sent.
+
+--- TEST F-04: IR Does Not Trigger (Retry Logic) ---
+Precondition: Block/disconnect IR so it will not fire.
+Steps:
+  1. Send 'F'
+  -> Attempt 1: piezo fires, "WARNING: IR did not confirm pill - retrying..."
+  -> Attempt 2: same
+  -> Attempt 3: same
+  -> "ERROR: Pill failed to dispense after 3 attempts"
+  -> STATUS sent with result=fail
+Pass: Exactly 3 attempts, error after 3rd, STATUS with result=fail.
+
+--- TEST F-05: Piezo Timeout (All 3 Retries) ---
+Precondition: Block/disconnect piezo so it will not fire.
+Steps:
+  1. Send 'F'; wait ~33 seconds
+  -> "TIMEOUT: Piezo did not trigger within 10000ms (attempt 1/3)"
+  -> "--- Retry attempt 2/3 ---"
+  -> "TIMEOUT: Piezo did not trigger within 10000ms (attempt 2/3)"
+  -> "--- Retry attempt 3/3 ---"
+  -> "TIMEOUT: Piezo did not trigger within 10000ms (attempt 3/3)"
+  -> "ERROR: Pill failed to dispense after 3 attempts"
+  -> STATUS sent with result=fail
+Pass: All 3 timeouts fired (~30 s), error after 3rd, STATUS correct.
+
+--- TEST F-06: Multi-Pill Dose (pills_per_dose = 2) ---
+Precondition: Load profile with dose=2, at least 2 pills loaded.
+Steps:
+  1. Send 'F'
+  -> "--- Dispensing pill 1/2 ---" ... SUCCESS
+  -> "--- Dispensing pill 2/2 ---" ... SUCCESS
+  -> "Dose complete! Pills remaining: X"
+  3. Send 'S'   -> pills decremented by 2
+Pass: Both pills confirmed, total count decremented by dose size.
+
+--- TEST F-07: STATUS Over UART After Dispense ---
+Precondition: Live ESP connected or monitor UART1 with a second terminal.
+Steps:
+  1. Perform a successful F dispense
+  -> UART1 output: "STATUS|slot=<n>|med=...|left=...|result=ok|..."
+  -> UART1 output: "ACK|action=DISPENSE|slot=<n>|result=ok" (if triggered by ESP)
+Pass: STATUS line appears on UART1 with correct slot, left count, and result.
+
+================================================================================
+SECTION 9 - ESP UART COMMANDS (via M command or live ESP)
+================================================================================
+
+--- TEST E-01: LOAD_PROFILE Command ---
+Steps:
+  1. Send 'M'; inject:
+     CMD|action=LOAD_PROFILE|slot=3|med=Ibuprofen|total=30|dose=2|time=850
+  -> "ACK|action=LOAD_PROFILE|slot=3|result=ok"
+  2. Send 'L'   -> slot 3 shows Ibuprofen, 30 pills, 2 per dose
+Pass: Profile loaded, persisted, reflected in list.
+
+--- TEST E-02: SET_TIME Command ---
+Steps:
+  1. Power-cycle Pico
+  2. Send 'K'   -> "(time not set)"
+  3. Send 'M'; inject:
+     CMD|action=SET_TIME|epoch=1744056000
+  -> "ACK|action=SET_TIME|slot=0|result=ok"
+  4. Send 'K'   -> shows a valid Eastern date/time
+Pass: Clock set, display shows valid local time.
+
+--- TEST E-03: SET_TIME Invalid/Missing Epoch ---
+Steps:
+  1. Send 'M'; inject: CMD|action=SET_TIME
+  -> "ACK|action=SET_TIME|slot=0|result=err_missing_epoch"
+  2. Send 'M'; inject: CMD|action=SET_TIME|epoch=0
+  -> "ACK|action=SET_TIME|slot=0|result=err_invalid_epoch"
+Pass: Both error ACKs returned, clock not changed.
+
+--- TEST E-04: DISPENSE Command from ESP ---
+Precondition: Profile loaded in slot 0 with pills available.
+Steps:
+  1. Send 'M'; inject:
+     CMD|action=DISPENSE|slot=0
+  -> Motor runs, sensors engage
+  -> STATUS printed on USB serial
+  -> "ACK|action=DISPENSE|slot=0|result=ok" (or fail if sensors not present)
+Pass: DISPENSE executes sensor-based dose, STATUS then ACK sent in that order.
+
+--- TEST E-05: DISPENSE Invalid Slot ---
+Steps:
+  1. Send 'M'; inject: CMD|action=DISPENSE|slot=9
+  -> "ACK|action=DISPENSE|slot=9|result=err_invalid_slot"
+Pass: Error ACK, motor does not run.
+
+--- TEST E-06: DISPENSE Inactive Slot ---
+Steps:
+  1. Ensure slot 4 has no profile loaded
+  2. Send 'M'; inject: CMD|action=DISPENSE|slot=4
+  -> "ACK|action=DISPENSE|slot=4|result=err_slot_not_active"
+Pass: Error ACK returned.
+
+================================================================================
+SECTION 10 - SOFTWARE RTC AND TIME (K COMMAND)
+================================================================================
+
+--- TEST K-01: Time Not Set on Fresh Boot ---
+Steps:
+  1. Power-cycle Pico; open serial immediately before ESP connects
+  2. Send 'K'
+  -> "Current time : (time not set)"
+Pass: Correct "(time not set)" shown.
+
+--- TEST K-02: TIME_REQ Sent on Boot ---
+Steps:
+  1. Power-cycle Pico with serial monitor open
+  -> Within 1 second: "[RTC] TIME_REQ sent to ESP - waiting for SET_TIME response"
+Pass: TIME_REQ printed at startup.
+
+--- TEST K-03: TIME_REQ Retry After 15 Seconds ---
+Steps:
+  1. Power-cycle Pico; do NOT connect ESP or inject SET_TIME
+  2. Wait ~15 seconds
+  -> Second "[RTC] TIME_REQ sent to ESP..." appears
+  3. Wait another 15 seconds
+  -> Third TIME_REQ appears
+Pass: Retries occur every ~15 s until SET_TIME received.
+
+--- TEST K-04: Time Set and Display ---
+Steps:
+  1. Send 'M'; inject: CMD|action=SET_TIME|epoch=1744056000
+  2. Send 'K'
+  -> Valid Eastern date/time displayed (EDT or EST label)
+  -> Minutes-of-day printed (0-1439 range)
+Pass: Correct local time shown, minutes value matches hour×60+min.
+
+--- TEST K-05: Manual Time Entry (YYYY-MM-DD HH:MM:SS) ---
+Steps:
+  1. Send 'K'
+  2. At prompt, type: 2026-04-09 12:00:00
+  -> "Time updated: 2026-04-09 08:00:00 EDT"
+     (input is treated as UTC; display converts to EDT = UTC-4)
+Pass: Time updated and displayed correctly.
+
+--- TEST K-06: Manual Time Entry (Unix Epoch) ---
+Steps:
+  1. Send 'K'
+  2. At prompt, type: 1744200000
+  -> Time updated to the corresponding Eastern local time
+Pass: Epoch parsed and clock set.
+
+--- TEST K-07: Eastern DST Boundary (Spring Forward) ---
+Note: Verify at second Sunday of March 07:00 UTC boundary.
+  Epoch 1741942799 = 2026-03-08 06:59:59 UTC -> 01:59:59 EST (UTC-5)
+  Epoch 1741942800 = 2026-03-08 07:00:00 UTC -> 03:00:00 EDT (UTC-4)
+Steps:
+  1. Inject SET_TIME with epoch=1741942799; send 'K' -> shows EST
+  2. Inject SET_TIME with epoch=1741942800; send 'K' -> shows EDT
+Pass: Label changes at exact boundary.
+
+================================================================================
+SECTION 11 - INTEGRATION: FULL BOOT SEQUENCE WITH ESP
+================================================================================
+
+--- TEST INT-01: Boot Sequence with Live ESP ---
+Precondition: ESP firmware running, connected via UART1, NTP time set on ESP.
+Steps:
+  1. Power-cycle both devices simultaneously
+  2. Observe Pico serial output:
+     -> "[RTC] TIME_REQ sent to ESP..."
+     -> One BOOT_SYNC line per active slot
+  3. Observe ESP serial:
+     -> ESP receives TIME_REQ, sends CMD|action=SET_TIME|epoch=...
+  4. Observe Pico:
+     -> "[RTC] Time set: epoch=..."
+     -> "ACK|action=SET_TIME|slot=0|result=ok" sent to ESP
+  5. Send 'K' on Pico   -> valid Eastern time shown
+Pass: Full boot handshake completes, time set, no retries needed.
+
+--- TEST INT-02: Dispense via ESP Dashboard ---
+Precondition: ESP web dashboard running (192.168.4.1), profile loaded in slot 0.
+Steps:
+  1. Connect phone to ESP WiFi network
+  2. Open browser to 192.168.4.1
+  3. Select slot 0 and press "Dispense Selected Slot"
+  4. Observe Pico serial: motor runs, sensors engage, STATUS then ACK output
+  5. Observe ESP dashboard: pill count updates after dispense
+Pass: End-to-end dispense via web UI completes successfully.
+
+--- TEST INT-03: Profile Saved on ESP, Sent to Pico ---
+Precondition: ESP web dashboard running.
+Steps:
+  1. Open dashboard; fill in slot 1: Medication=Aspirin, Total=20, Dose=1, Time=800
+  2. Press "Save Profile"
+  3. Observe Pico serial:
+     -> "ACK|action=LOAD_PROFILE|slot=1|result=ok"
+  4. Send 'L' on Pico   -> slot 1 shows Aspirin, 20 pills
+  5. Power-cycle Pico
+  6. Observe BOOT_SYNC for slot 1 sent to ESP on reboot
+Pass: Profile round-trips correctly; persists through reboot.
+
+================================================================================
+TIMING REFERENCE
+================================================================================
+
+  Piezo debounce:             100 ms  (PIEZO_DEBOUNCE_MS)
+  Hall effect debounce:        10 ms  (HALL_DEBOUNCE_MS)
+  IR debounce:                 50 ms  (IR_DEBOUNCE_MS)
+  Piezo wait timeout:      10 000 ms  per attempt
+  IR confirmation window:     300 ms  after piezo fires
+  Max retries per pill:       3
+  Motor reverse settle:      ~1 000 ms between retries
+  Max single dispense time:   ~35 s   (3 retries worst case)
+  TIME_REQ retry interval:    15 s    (while !rtc_is_set)
+  ESP ACK timeout:    must be >= 40 s (set on ESP side)
+
+================================================================================
+TROUBLESHOOTING NOTES
+================================================================================
+
+Piezo gives false triggers during motor vibration:
+  - Increase PIEZO_DEBOUNCE_MS in sensor_interrupts.h
+  - Add mechanical isolation between motor mount and piezo mount
+
+IR gives false triggers from ambient light:
+  - Shield IR emitter/receiver pair from direct light
+  - Increase IR_DEBOUNCE_MS in sensor_interrupts.h
+
+IR consistently misses the 300 ms window with real pills:
+  - Increase sleep_ms(300) in pill_dispenser.c to 500 ms
+
+Time shows "(time not set)" after reboot and ESP is connected:
+  - ESP is waiting for user to press "Send Time" in dashboard (AP-only mode,
+    no internet NTP access). Open 192.168.4.1 and press "Send Time".
+  - Pico will retry TIME_REQ every 15 s automatically until answered.
+
+Flash not persisting across reboot:
+  - Check magic number and checksum logic in pico_storage.c
+  - Verify FLASH_TARGET_OFFSET points to last flash sector and does not
+    overlap with program code
+
+================================================================================
+END OF TEST PLAN
+================================================================================

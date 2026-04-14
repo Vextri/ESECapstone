@@ -1,4 +1,5 @@
-Record=TopLevelDocument|FileName=Boost.SchDoc|SheetNumber=3
-Record=NoMainPathDocument|SourceDocument=Boost.SchDoc|FileName=ChargerIC.SchDoc|SheetNumber=2
+Record=TopLevelDocument|FileName=Boost.SchDoc|SheetNumber=4
+Record=NoMainPathDocument|SourceDocument=Boost.SchDoc|FileName=ChargerIC.SchDoc|SheetNumber=3
 Record=NoMainPathDocument|SourceDocument=Boost.SchDoc|FileName=HallSensor.SchDoc|SheetNumber=1
-Record=NoMainPathDocument|SourceDocument=Boost.SchDoc|FileName=MotorDriver.SchDoc|SheetNumber=4
+Record=NoMainPathDocument|SourceDocument=Boost.SchDoc|FileName=MotorDriver.SchDoc|SheetNumber=5
+Record=NoMainPathDocument|SourceDocument=Boost.SchDoc|FileName=Rpi Connections.SchDoc|SheetNumber=2

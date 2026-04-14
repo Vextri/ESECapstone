@@ -21,6 +21,8 @@ static bool     s_time_set   = false;
 static uint32_t s_base_epoch = 0;   // Unix epoch snapshot when time was set
 static uint64_t s_base_us    = 0;   // time_us_64() snapshot when time was set
 
+static int32_t eastern_offset(uint32_t epoch);  // forward declaration
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------

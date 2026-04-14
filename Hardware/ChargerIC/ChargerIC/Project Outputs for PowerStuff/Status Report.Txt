@@ -1,0 +1,10 @@
+Output: Report Project Hierarchy
+Type  : ReportHierarchy
+From  : Variant [[No Variations]] of Project [PowerStuff.PrjPcb]
+   Generated File[Rpi Connections.REP]
+
+
+Files Generated   : 1
+Documents Printed : 0
+
+Finished Output Generation At 2:04:03 PM On 2026-04-09

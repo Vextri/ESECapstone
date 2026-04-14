@@ -1,0 +1,464 @@
+================================================================================
+                    PILL DISPENSER SYSTEM - FEATURE DOCUMENTATION
+================================================================================
+Date: April 9, 2026
+Platform: Raspberry Pi Pico 2 (RP2350, ARM Cortex-M33)
+SDK: Pico SDK 2.2.0
+Build System: CMake + Ninja
+
+================================================================================
+                                SYSTEM OVERVIEW
+================================================================================
+
+This is a prototype automated pill dispensing system built on the Raspberry Pi
+Pico 2 (RP2350).  It manages up to 5 medication profiles, controls a DC motor
+carousel and a stepper motor, uses three sensors to confirm pill delivery, and
+communicates with a companion ESP over a dedicated hardware UART.
+
+Key Components:
+- Raspberry Pi Pico 2 (RP2350) microcontroller — main execution authority
+- DC motor via H-bridge for carousel rotation
+- Stepper motor via DRV8833 for fine positioning
+- Three-sensor interrupt system: Piezo, Hall Effect, IR
+- Hardware UART1 (GPIO 20/21) for ESP communication
+- Flash persistence — 5 profile slots survive power-off
+- Software RTC with US Eastern DST support
+
+System Roles:
+  Pico owns:  motor control, sensor processing, dispense execution,
+              flash persistence, RTC (time tracking), profile slots
+  ESP owns:   user-facing web dashboard, time distribution (NTP),
+              profile configuration UI, dispense history, notifications
+
+================================================================================
+                                MOTOR CONTROL SYSTEM
+================================================================================
+
+DC Motor (H-Bridge):
+- PWM Output: GPIO 0 (speed control)
+- Direction Pin 1: GPIO 1
+- Direction Pin 2: GPIO 2
+- Operation modes:
+    FORWARD:  DIR_PIN1=HIGH, DIR_PIN2=LOW, PWM=ON
+    BACKWARD: DIR_PIN1=LOW,  DIR_PIN2=HIGH, PWM=ON
+    STOP:     Both pins LOW, PWM=OFF
+
+Functions (motor_control.h):
+  motor_init()               Initialize PWM and GPIO
+  motor_forward()            Rotate motor forward
+  motor_backward()           Rotate motor backward
+  motor_stop()               Stop motor immediately
+  motor_set_direction(dir)   Set direction via enum
+
+Terminal commands:
+  W — motor forward
+  N — motor backward
+  X — motor stop
+
+Stepper Motor (DRV8833 Dual H-Bridge):
+- AIN1: STEPPER_AIN1_PIN
+- AIN2: STEPPER_AIN2_PIN
+- BIN1: STEPPER_BIN1_PIN
+- BIN2: STEPPER_BIN2_PIN
+- Drive mode: Full-step, both coils always energized for maximum torque
+- Step sequence (4 steps): A+B+, A-B+, A-B-, A+B-
+- Non-blocking: stepper_task() advances one step per call in main loop
+- Step count tracked via stepper_get_step_count()
+
+Functions (stepper_control.h):
+  stepper_init()                       Initialize GPIO pins
+  stepper_set_direction(dir)           FORWARD / BACKWARD / IDLE
+  stepper_stop()                       Stop and de-energize coils
+  stepper_task()                       Advance one step if due (call every loop)
+  stepper_get_step_count()             Total steps taken since init
+
+Terminal commands:
+  A — stepper forward (continuous)
+  Z — stepper backward (continuous)
+  E — stepper stop (prints step count)
+
+================================================================================
+                            SENSOR INTERRUPT SYSTEM
+================================================================================
+
+Three-Sensor Architecture:
+
+1. PIEZO SENSOR (GPIO 5)
+   - Detects pill impact / vibration
+   - Voltage: voltage divider protected
+   - Edge: both rising and falling
+   - Debounce: PIEZO_DEBOUNCE_MS (100 ms)
+   - Role in dispense: Primary pill confirmation — motor stops on trigger
+
+2. HALL EFFECT SENSOR (GPIO 6)
+   - Detects magnet on carousel for position reference
+   - Voltage: voltage divider protected
+   - Edge: falling only (HIGH->LOW = magnet present)
+   - Debounce: HALL_DEBOUNCE_MS (10 ms)
+   - Role in dispense: carousel home position
+
+3. IR SENSOR (GPIO 7)
+   - Detects beam break/restore in pill chute
+   - Logic: active low (beam broken = LOW)
+   - Edge: both rising and falling
+   - Debounce: IR_DEBOUNCE_MS (50 ms)
+   - Role in dispense: Secondary confirmation — verifies pill passed through chute
+
+Interrupt System:
+  - Unified GPIO interrupt handler works around Pico SDK single-callback limit
+  - Each sensor independently enable/disable-able at runtime
+  - Callback system: user code registers per-sensor callbacks
+
+Functions (sensor_interrupts.h):
+  sensor_interrupts_init()          Initialize all sensors (disabled by default)
+  piezo_enable() / piezo_disable()
+  hall_effect_enable() / hall_effect_disable()
+  ir_enable() / ir_disable()
+  piezo_set_callback(fn)            Register callback for piezo events
+  hall_effect_set_callback(fn)
+  ir_set_callback(fn)
+  sensor_interrupts_reset_all()     Reset all event counters
+  sensor_interrupts_status()        Print all sensor states and counts
+  sensor_interrupts_debug_config()  Print full GPIO/IRQ config
+
+Terminal commands:
+  P — toggle piezo
+  H — toggle hall effect
+  I — toggle IR
+  R — reset all sensor counts
+  T — print sensor status
+  G — snapshot GPIO state (GPIO 5, 6, 7)
+  V — continuous GPIO monitor at ~5 Hz (exit with any key)
+  C — full interrupt configuration debug dump
+
+================================================================================
+                          PILL DISPENSER - PROFILE SYSTEM
+================================================================================
+
+Profile Slots:
+  - 5 slots (0-4), all 0-indexed throughout the system
+  - All slots flash-persisted and restored on every boot
+  - Multiple slots can be active simultaneously
+  - One slot is the "selected" slot for manual dispense commands
+
+dispense_profile_t fields:
+  medication_name[32]         Medication label (max 31 chars)
+  pills_remaining             Current count (Pico is authoritative)
+  pills_per_dose              Pills dispensed per dose
+  dispense_time_ms            DC motor run time per pill (timed-dispense path)
+  is_active                   Whether this slot has a profile loaded
+  schedule_count              Number of scheduled daily doses (0-4)
+  schedule_times_mins[4]      Minutes since midnight for each dose time
+                              (e.g. 08:00 = 480, 20:00 = 1200)
+
+Functions (pill_dispenser.h):
+  dispenser_init()                          Boot init - loads flash, sends BOOT_SYNC
+  dispenser_load_profile_to_slot(...)       Load/overwrite a slot
+  dispenser_set_profile_schedule(...)       Set schedule times for a slot
+  dispenser_switch_to_profile(slot)         Set active slot for manual commands
+  dispenser_get_current_profile_slot()      Returns active slot index
+  dispenser_list_all_profiles()             Print all slot details
+  dispenser_execute_dose()                  Timed dispense from active slot
+  dispenser_execute_dose_sensor_based()     Sensor-based dispense from active slot
+  dispenser_get_status()                    Print full current status
+  dispenser_get_remaining_pills()           Returns pills left in active slot
+
+Terminal commands:
+  D — timed dispense (active slot)
+  F — sensor-based dispense (active slot)
+  S — show current status
+  L — list all profiles
+  1 — switch to slot 0 (Vitamin D)
+  2 — switch to slot 1 (Aspirin)
+  M — inject ESP-format command from terminal (10s input timeout, with echo)
+  B — simulate button press (executes sensor-based dose)
+
+================================================================================
+                          SENSOR-BASED DISPENSE ENGINE
+================================================================================
+
+dispenser_execute_dose_sensor_based() is the primary dispense path used by
+both the F terminal command and the DISPENSE command from the ESP.
+
+Pre-checks:
+  1. Active slot must be set (current_profile_slot >= 0)
+  2. Slot must have is_active = true
+  3. pills_remaining >= pills_per_dose
+     (sends STATUS result=fail, event="Dispense rejected" otherwise)
+
+Per-pill loop (repeated for each pill in the dose):
+  - Enables piezo and IR sensors
+  - Starts DC motor forward
+  - Polls up to 10 000 ms for piezo trigger (5 ms polling interval)
+  - On piezo trigger: stops motor immediately
+  - Waits 300 ms for IR beam break to confirm pill passage
+  - If IR confirmed: pill success, decrement pills_remaining
+  - If IR not confirmed: retry (up to 3 total attempts per pill)
+  - After 3 failed attempts: dose fails
+
+Post-dispense:
+  - Sends STATUS message to ESP over UART1
+  - Saves updated profiles to flash
+
+STATUS message format:
+  STATUS|slot=<n>|med=<name>|left=<pills>|dose=<n>|doses=<n>|
+        last=uptime HH:MM:SS|event=<text>|result=<ok|fail>|notes=<text>\n
+
+Event strings:
+  "Dispense complete"   - all pills confirmed by sensors,  result=ok
+  "Dispense incomplete" - some or all pills failed sensors, result=fail
+  "Dispense rejected"   - insufficient pills remaining,    result=fail
+
+Timing constants:
+  Piezo timeout per attempt:   10 000 ms
+  IR confirmation window:         300 ms
+  Retry settle delay:            ~1 000 ms (motor reverse + pause)
+  Maximum total dispense time:   ~35 s (3 retries x 10s + overhead)
+
+================================================================================
+                        FLASH PERSISTENCE (pico_storage.c)
+================================================================================
+
+All 5 profile slots are saved to and loaded from flash automatically.
+
+Storage layout:
+  Location:   Last 4096-byte sector of Pico flash
+  Structure:  [magic u32 (0xD15PEN5E)] [dispense_profile_t x 5] [checksum u32]
+  Checksum:   Simple 32-bit sum of all profile bytes
+
+Functions (pico_storage.h):
+  flash_profiles_save(profiles)   Write all 5 slots to flash
+  flash_profiles_load(profiles)   Read all 5 slots; returns false if blank/corrupt
+
+Boot behaviour:
+  dispenser_init() calls flash_profiles_load().
+  If valid data found: profiles restored, BOOT_SYNC sent to ESP per active slot.
+  If blank/corrupt: profiles zeroed, defaults loaded.
+
+================================================================================
+                         ESP UART BRIDGE (esp_uart.c)
+================================================================================
+
+Physical interface:
+  UART:       uart1 (hardware UART, NOT the USB serial port)
+  Baud:       115 200 8N1, no flow control
+  Pico TX:    GPIO 20 -> ESP RX
+  Pico RX:    GPIO 21 -> ESP TX
+  Line end:   \n (also accepts \r\n from ESP)
+  Max line:   255 bytes (longer lines silently discarded)
+
+esp_uart_poll() - call every main loop iteration:
+  - Reads available bytes into a 256-byte line buffer
+  - On newline: dispatches to handler based on action= field
+  - Strips \r and \n before parsing
+
+Supported incoming commands (ESP -> Pico):
+
+  CMD|action=LOAD_PROFILE|slot=<n>|med=<name>|total=<n>|dose=<n>|time=<ms>[|schedule=HH:MM,...]
+    Loads profile into slot n, resets pills_remaining to total, optionally sets schedule.
+    ACK: ACK|action=LOAD_PROFILE|slot=<n>|result=ok\n
+         ACK|action=LOAD_PROFILE|slot=<n>|result=err_missing_fields\n
+         ACK|action=LOAD_PROFILE|slot=<n>|result=err_invalid_slot\n
+
+  CMD|action=SET_TIME|epoch=<unix_ts>
+    Sets the software RTC. Epoch must be > 0.
+    ACK: ACK|action=SET_TIME|slot=0|result=ok\n
+         ACK|action=SET_TIME|slot=0|result=err_missing_epoch\n
+         ACK|action=SET_TIME|slot=0|result=err_invalid_epoch\n
+
+  CMD|action=DISPENSE[|slot=<n>]
+    Optionally switches to slot n, then executes sensor-based dose.
+    Response order: STATUS message first, then ACK.
+    ACK: ACK|action=DISPENSE|slot=<n>|result=ok\n
+         ACK|action=DISPENSE|slot=<n>|result=fail\n
+         ACK|action=DISPENSE|slot=<n>|result=err_invalid_slot\n
+         ACK|action=DISPENSE|slot=<n>|result=err_slot_not_active\n
+
+esp_uart_inject_line(line) - used by terminal M command to test commands
+  without a live ESP attached.
+
+BOOT_SYNC (Pico -> ESP, sent by dispenser_init() on every boot):
+  One line per active slot:
+  BOOT_SYNC|slot=<n>|med=<name>|left=<pills>|dose=<n>|doses=<n>|schedule=<times|none>\n
+
+TIME_REQ (Pico -> ESP, sent by rtc_request_from_esp()):
+  TIME_REQ\n
+  - Sent once on boot
+  - Retried every 15 seconds in main loop while !rtc_is_set()
+
+================================================================================
+                           SOFTWARE RTC (pico_rtc.c)
+================================================================================
+
+The Pico 2 has no battery-backed RTC. Time is maintained in software using
+time_us_64() as the tick source. Time is lost on power-cycle; the ESP
+re-syncs the Pico on every boot via SET_TIME.
+
+State:
+  s_base_epoch   Unix epoch at the moment SET_TIME was received
+  s_base_us      time_us_64() snapshot at that moment
+  s_time_set     false until the first valid SET_TIME is received
+
+Runtime epoch calculation:
+  rtc_get_epoch() = s_base_epoch + (time_us_64() - s_base_us) / 1 000 000
+
+US Eastern DST:
+  eastern_offset() returns -14400 (EDT, UTC-4) or -18000 (EST, UTC-5).
+  EDT runs from the second Sunday in March at 07:00 UTC
+              to the first Sunday in November at 06:00 UTC.
+  All display functions and rtc_get_minutes_of_day() return local Eastern time.
+
+Functions (pico_rtc.h):
+  rtc_init_module()              Clear state at startup
+  rtc_is_set()                   Returns true after first valid SET_TIME
+  rtc_set_epoch(epoch)           Set base epoch (called by SET_TIME handler)
+  rtc_get_epoch()                Current UTC Unix timestamp (0 if not set)
+  rtc_get_minutes_of_day()       Local Eastern minutes since midnight (0-1439)
+  rtc_get_time_str(buf, len)     "YYYY-MM-DD HH:MM:SS EDT/EST" or "(time not set)"
+  rtc_parse_datetime_str(str)    Parse "YYYY-MM-DD HH:MM:SS" -> epoch
+  rtc_request_from_esp()         Send TIME_REQ\n over UART1
+
+Terminal K command:
+  Displays current local Eastern time and minutes-of-day.
+  Optionally accepts a new time as "YYYY-MM-DD HH:MM:SS" or a raw Unix epoch.
+
+================================================================================
+                              PIN ASSIGNMENTS
+================================================================================
+
+DC Motor:
+  GPIO 0  - PWM (speed)
+  GPIO 1  - Direction pin 1
+  GPIO 2  - Direction pin 2
+
+Stepper Motor (DRV8833):
+  STEPPER_AIN1_PIN, STEPPER_AIN2_PIN, STEPPER_BIN1_PIN, STEPPER_BIN2_PIN
+  (defined in stepper_control.h)
+
+Sensors:
+  GPIO 5  - Piezo
+  GPIO 6  - Hall Effect
+  GPIO 7  - IR Sensor
+
+ESP UART:
+  GPIO 20 - Pico TX -> ESP RX
+  GPIO 21 - Pico RX -> ESP TX
+
+================================================================================
+                              BOOT SEQUENCE
+================================================================================
+
+1. stdio_init_all()              USB serial ready
+2. rtc_init_module()             Software RTC cleared
+3. dispenser_init()              Profiles loaded from flash
+                                 BOOT_SYNC sent per active slot to ESP
+4. stepper_init()                Stepper GPIO configured, de-energized
+5. sensor_interrupts_init()      All sensors initialized (disabled by default)
+6. Sensor callbacks registered
+7. rtc_request_from_esp()        TIME_REQ sent; last_time_req_us recorded
+8. Main loop starts
+
+Main loop (each iteration):
+  - Polls USB serial for terminal commands (getchar_timeout_us(0), non-blocking)
+  - Calls esp_uart_poll() for incoming ESP commands
+  - If !rtc_is_set() and 15 s elapsed since last TIME_REQ: resend TIME_REQ
+  - Calls stepper_task() for non-blocking step advancement
+  - sleep_ms(1)
+
+================================================================================
+                          COMPLETE COMMAND REFERENCE
+================================================================================
+
+DISPENSING:
+  D — timed dispense from active slot (uses dispense_time_ms per pill)
+  F — sensor-based dispense from active slot (primary dispense path)
+  S — show active slot status
+  L — list all 5 profile slots
+
+PROFILES:
+  1 — switch active slot to 0 (Vitamin D)
+  2 — switch active slot to 1 (Aspirin)
+  M — inject a raw ESP-format command line (10s input timeout, with echo)
+
+TIME:
+  K — show local Eastern time and minutes-of-day
+      (optionally enter new time: YYYY-MM-DD HH:MM:SS or Unix epoch integer)
+
+SENSORS:
+  P — toggle piezo on/off
+  H — toggle hall effect on/off
+  I — toggle IR on/off
+  R — reset all sensor counts to 0
+  T — print sensor enable states and event counts
+  G — snapshot GPIO 5/6/7 raw logic levels
+  V — continuous GPIO monitor at ~5 Hz (any key to exit)
+  C — full interrupt configuration debug dump
+
+DC MOTOR:
+  W — motor forward
+  N — motor backward
+  X — motor stop
+
+STEPPER MOTOR:
+  A — stepper forward (continuous until E)
+  Z — stepper backward (continuous until E)
+  E — stepper stop (prints total step count)
+
+SYSTEM:
+  B — simulate button press (sensor-based dose on active slot)
+  Q — shutdown (stops motor, exits)
+
+================================================================================
+                           CURRENT BUILD STATUS
+================================================================================
+
+  PLATFORM:              Raspberry Pi Pico 2 (RP2350)       PASS
+  COMPILE:               Clean, no errors or warnings        PASS
+  FLASH OUTPUT:          .elf and .uf2 produced              PASS
+  DC MOTOR:              Forward / backward / stop           PASS
+  STEPPER MOTOR:         Non-blocking full-step control      PASS
+  SENSOR SYSTEM:         All three sensors operational       PASS
+  SENSOR DEBOUNCE:       Piezo 100ms, Hall 10ms, IR 50ms     PASS
+  FLASH PERSISTENCE:     All 5 slots survive power-cycle     PASS
+  BOOT_SYNC:             Sent on every boot per active slot  PASS
+  ESP UART RX:           LOAD_PROFILE, SET_TIME, DISPENSE    PASS
+  STATUS TX:             Sent after every dispense attempt   PASS
+  ACK TX:                Sent after every command received   PASS
+  SOFTWARE RTC:          Eastern DST-aware time tracking     PASS
+  TIME_REQ ON BOOT:      Sent at startup                     PASS
+  TIME_REQ RETRY:        Retried every 15s if not set        PASS
+  SCHEDULING ENGINE:     Infrastructure complete,
+                         auto-fire not yet wired in          PENDING
+
+================================================================================
+                           KNOWN LIMITATIONS
+================================================================================
+
+- Auto-scheduling not yet active: schedule_times_mins[] and schedule_count are
+  stored and flash-persisted, but the main loop does not yet check
+  rtc_get_minutes_of_day() to automatically fire scheduled dispenses.
+
+- Software RTC drifts slightly over time (~10 ppm from crystal). Acceptable for
+  a daily-dose scheduler. The ESP can re-send SET_TIME periodically to correct.
+
+- Time is lost on every power cycle. Automatic scheduled dispensing cannot
+  occur until the ESP provides a valid SET_TIME. In the current ESP build
+  (AP-only, no internet), the user must open the web dashboard and press
+  "Send Time" manually after each power cycle.
+
+================================================================================
+                           FUTURE ENHANCEMENTS
+================================================================================
+
+  [ ] Scheduling engine - wire rtc_get_minutes_of_day() check into main loop
+      to auto-fire dispenses against schedule_times_mins[]
+  [ ] ALERT messages to ESP when pills fall below a configured threshold
+  [ ] ESP Station+AP (WIFI_MODE_APSTA) for home WiFi + automatic NTP sync
+  [ ] ntfy.sh push notifications via ESP HTTP POST on dispense events
+  [ ] mDNS (http://protopill.local) for easier dashboard access
+  [ ] Variable motor speed / adaptive dispense calibration
+  [ ] Watchdog timer for hardware fault recovery
+
+================================================================================
+                                    END
+================================================================================
