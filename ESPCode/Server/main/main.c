@@ -13,7 +13,6 @@
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_netif.h"
-#include "esp_sntp.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
@@ -26,7 +25,7 @@
 static const char *TAG = "time_server";
 
 #define AP_SSID "ESP-Time-Server"
-#define AP_PASS "12345678"
+#define AP_PASS "123456789"
 #define AP_MAX_CONN 4
 
 #define DNS_PORT 53
@@ -737,7 +736,6 @@ static void start_uart_bridge(void)
 		 "UART bridge ready on ESP GPIO%d(TX) and GPIO%d(RX). Waiting for Pico to push STATUS events.",
 		 UART_BRIDGE_TX_PIN,
 		 UART_BRIDGE_RX_PIN);
-	bridge_send_set_time();
 	xTaskCreate(uart_bridge_task, "uart_bridge", 4096, NULL, 5, NULL);
 }
 
@@ -1072,17 +1070,6 @@ static esp_err_t time_sync_post_handler(httpd_req_t *req)
 	}
 
 	return send_json_response(req, "200 OK", "{\"ok\":true}");
-}
-
-static void start_time_sync(void)
-{
-	if (esp_sntp_enabled()) {
-		return;
-	}
-
-	esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
-	esp_sntp_setservername(0, "pool.ntp.org");
-	esp_sntp_init();
 }
 
 static esp_err_t status_get_handler(httpd_req_t *req)
@@ -1525,7 +1512,6 @@ static void start_wifi_ap(void)
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
 	ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
 	ESP_ERROR_CHECK(esp_wifi_start());
-	start_time_sync();
 	esp_wifi_set_max_tx_power(84); /* 84 = 21 dBm, maximum */
 
 	ESP_LOGI(TAG, "Wi-Fi AP started. SSID: %s, Password: %s", AP_SSID, use_password ? AP_PASS : "<open>");

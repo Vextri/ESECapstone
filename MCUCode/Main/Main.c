@@ -65,10 +65,6 @@ int main() {
     // (profiles are now restored from flash automatically in dispenser_init)
     // dispenser_switch_to_profile is only needed if flash had a valid active slot
     
-    // Request current time from ESP (no battery-backed RTC on Pico2)
-    rtc_request_from_esp();
-    uint64_t last_time_req_us = time_us_64();
-
     printf("\n=== PILL DISPENSER PROTOTYPE ===\n");
     printf("Commands:\n");
     printf("D - Dispense dose (timed)\n");
@@ -344,15 +340,6 @@ int main() {
         
         // Poll ESP UART for incoming commands
         esp_uart_poll();
-
-        // Retry TIME_REQ every 15 seconds until ESP responds with a valid time
-        if (!rtc_is_set()) {
-            uint64_t now_us = time_us_64();
-            if (now_us - last_time_req_us >= 15000000ULL) {
-                rtc_request_from_esp();
-                last_time_req_us = now_us;
-            }
-        }
 
         // Advance stepper motor one half-step if due
         stepper_task();
