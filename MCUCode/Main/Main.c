@@ -9,9 +9,12 @@
 // Commands: D=dispense, S=status, B=button sim, L=load profile, W/X=manual motor, Q=quit
 
 #include "pico/stdlib.h"
+#include "pico/stdio.h"
+#include "pico/error.h"
 #include "motor_control.h"
 #include "pill_dispenser.h"
 #include "sensor_interrupts.h"
+#include "stepper_control.h"
 #include <stdio.h>
 
 // Sensor callback functions
@@ -21,8 +24,7 @@ void on_piezo_detected(void) {
 }
 
 void on_hall_effect_detected(void) {
-    printf(">>> MOTOR POSITION DETECTED! (Hall Effect) <<<\n");
-    // Could add motor position tracking logic here
+    printf(">>> HALL EFFECT: HIGH->LOW detected <<<\n");
 }
 
 void on_ir_detected(void) {
@@ -41,6 +43,9 @@ int main() {
     
     // Initialize pill dispenser system (includes motor init)
     dispenser_init();
+
+    // Initialize stepper motor
+    stepper_init();
     
     // Initialize sensor interrupt system
     sensor_interrupts_init();
@@ -59,7 +64,8 @@ int main() {
     
     printf("\n=== PILL DISPENSER PROTOTYPE ===\n");
     printf("Commands:\n");
-    printf("D - Dispense dose\n");
+    printf("D - Dispense dose (timed)\n");
+    printf("F - Dispense dose (sensor feedback)\n");
     printf("S - Show status\n");
     printf("L - List all profiles\n");
     printf("B - Simulate button press\n");
@@ -76,7 +82,12 @@ int main() {
     printf("C - Debug interrupt configuration\n");
     printf("--- Manual Motor Control ---\n");
     printf("W - Motor forward\n");
+    printf("N - Motor backward\n");
     printf("X - Motor stop\n");
+    printf("--- Stepper Motor Control ---\n");
+    printf("A - Stepper forward (continuous)\n");
+    printf("Z - Stepper backward (continuous)\n");
+    printf("E - Stepper stop\n");
     printf("Q - Quit\n");
     printf("==============================\n\n");
 
@@ -91,6 +102,11 @@ int main() {
                 case 'd':
                 case 'D':
                     dispenser_execute_dose();
+                    break;
+                    
+                case 'f':
+                case 'F':
+                    dispenser_execute_dose_sensor_based();
                     break;
                     
                 case 's':
@@ -188,12 +204,37 @@ int main() {
                     motor_forward();
                     break;
                     
+                case 'n':
+                case 'N':
+                    printf("Manual motor backward\n");
+                    motor_backward();
+                    break;
+
                 case 'x':
                 case 'X':
                     printf("Manual motor stop\n");
                     motor_stop();
                     break;
-                    
+
+                // Stepper motor control
+                case 'a':
+                case 'A':
+                    printf("Stepper forward\n");
+                    stepper_set_direction(STEPPER_FORWARD);
+                    break;
+
+                case 'z':
+                case 'Z':
+                    printf("Stepper backward\n");
+                    stepper_set_direction(STEPPER_BACKWARD);
+                    break;
+
+                case 'e':
+                case 'E':
+                    printf("Stepper stop (steps: %lu)\n", stepper_get_step_count());
+                    stepper_stop();
+                    break;
+
                 case 'q':
                 case 'Q':
                     printf("Shutting down dispenser...\n");
@@ -205,8 +246,11 @@ int main() {
             }
         }
         
+        // Advance stepper motor one half-step if due
+        stepper_task();
+
         // Small delay to prevent excessive CPU usage
-        sleep_ms(10);
+        sleep_ms(1);
     }
 
     return 0;
