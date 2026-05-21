@@ -25,8 +25,8 @@
 #define STEPPER_BIN2_PIN    11  // DRV8833 BIN2
 
 // Step timing: microseconds between each full-step
-// 3000us = ~333 full-steps/sec, slower speed = more torque
-#define STEPPER_STEP_DELAY_US 3000
+// 2000us = ~500 full-steps/sec (~4 sec/revolution on 28BYJ-48)
+#define STEPPER_STEP_DELAY_US 2000
 
 // Direction values
 typedef enum {

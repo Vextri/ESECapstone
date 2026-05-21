@@ -21,6 +21,7 @@
 #include "lwip/sockets.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "driver/spi_master.h"
 
 static const char *TAG = "time_server";
 
@@ -42,9 +43,11 @@ static const char *TAG = "time_server";
 #define UART_BRIDGE_LINE_SIZE 256
 #define UART_BRIDGE_TIMEOUT_US (5 * 1000000)
 #define PILL_SLOT_COUNT 5
-#define STATUS_RESPONSE_BUFFER_SIZE 4096
-#define STATUS_SLOTS_BUFFER_SIZE 3072
-#define DISPENSE_HISTORY_COUNT 16
+#define STATUS_RESPONSE_BUFFER_SIZE 8192
+#define STATUS_SLOTS_BUFFER_SIZE    3072
+#define HISTORY_JSON_BUFFER_SIZE    3300
+#define DISPENSE_HISTORY_COUNT      16
+#define LOW_PILL_THRESHOLD          5
 #define BRIDGE_NVS_NAMESPACE "bridge_state"
 #define HTTP_BODY_BUFFER_SIZE 512
 #define DISPENSE_ACK_TIMEOUT_US (40 * 1000000LL)
@@ -91,6 +94,408 @@ typedef struct {
 
 static SemaphoreHandle_t bridge_state_mutex;
 static pico_bridge_state_t bridge_state;
+
+/* ── ST7796 LCD display ───────────────────────────────────────────────────── *
+ * GPIO 11 and 12 are taken by the UART bridge (RX/TX to Pico), so MOSI and  *
+ * CLK must use different pins. All other original pins are kept as-is.       */
+#define LCD_MOSI  13
+#define LCD_CLK   14
+#define LCD_CS    15
+#define LCD_DC     2
+#define LCD_RST    4
+#define LCD_BL     5
+
+#define SCREEN_W  480
+#define SCREEN_H  320
+
+#define LCD_BLACK   0x0000
+#define LCD_WHITE   0xFFFF
+#define LCD_CYAN    0x07FF
+#define LCD_YELLOW  0xFFE0
+#define LCD_GREEN   0x07E0
+#define LCD_RED     0xF800
+#define LCD_GREY    0x8410
+#define LCD_DKGREY  0x4208
+
+static spi_device_handle_t lcd_spi;
+static uint8_t lcd_row_buf[SCREEN_W * 2];
+
+static void lcd_send_cmd(uint8_t cmd)
+{
+	gpio_set_level(LCD_DC, 0);
+	spi_transaction_t t = { .length = 8, .tx_buffer = &cmd };
+	spi_device_transmit(lcd_spi, &t);
+}
+
+static void lcd_send_data(const uint8_t *data, int len)
+{
+	if (len == 0) {
+		return;
+	}
+	gpio_set_level(LCD_DC, 1);
+	spi_transaction_t t = { .length = (size_t)len * 8, .tx_buffer = data };
+	spi_device_transmit(lcd_spi, &t);
+}
+
+static void lcd_send_byte(uint8_t b)
+{
+	lcd_send_data(&b, 1);
+}
+
+static void lcd_st7796_init(void)
+{
+	gpio_set_level(LCD_RST, 0);
+	vTaskDelay(pdMS_TO_TICKS(10));
+	gpio_set_level(LCD_RST, 1);
+	vTaskDelay(pdMS_TO_TICKS(120));
+	lcd_send_cmd(0x01);
+	vTaskDelay(pdMS_TO_TICKS(120));
+	lcd_send_cmd(0x11);
+	vTaskDelay(pdMS_TO_TICKS(120));
+	lcd_send_cmd(0x3A); lcd_send_byte(0x55);
+	lcd_send_cmd(0x36); lcd_send_byte(0x28); /* landscape: MV=1, BGR=1 */
+	lcd_send_cmd(0x29);
+}
+
+static void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
+{
+	uint8_t col[] = { x0 >> 8, x0, x1 >> 8, x1 };
+	uint8_t row[] = { y0 >> 8, y0, y1 >> 8, y1 };
+	lcd_send_cmd(0x2A); lcd_send_data(col, 4);
+	lcd_send_cmd(0x2B); lcd_send_data(row, 4);
+	lcd_send_cmd(0x2C);
+	gpio_set_level(LCD_DC, 1);
+}
+
+static void lcd_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color)
+{
+	int row_bytes;
+	int i;
+
+	if (w == 0 || h == 0) {
+		return;
+	}
+	row_bytes = (int)w * 2;
+	if (row_bytes > (int)sizeof(lcd_row_buf)) {
+		row_bytes = (int)sizeof(lcd_row_buf);
+	}
+	for (i = 0; i < row_bytes; i += 2) {
+		lcd_row_buf[i]     = (uint8_t)(color & 0xFF);
+		lcd_row_buf[i + 1] = (uint8_t)(color >> 8);
+	}
+	lcd_set_window(x, y, (uint16_t)(x + w - 1), (uint16_t)(y + h - 1));
+	for (i = 0; i < (int)h; i++) {
+		lcd_send_data(lcd_row_buf, row_bytes);
+	}
+}
+
+static void lcd_draw_hline(uint16_t x, uint16_t y, uint16_t w, uint16_t color)
+{
+	lcd_fill_rect(x, y, w, 2, color);
+}
+
+static const uint8_t lcd_font5x7[][5] = {
+	{0x00,0x00,0x00,0x00,0x00}, /* space */
+	{0x00,0x00,0x5F,0x00,0x00}, /* !     */
+	{0x00,0x07,0x00,0x07,0x00}, /* "     */
+	{0x14,0x7F,0x14,0x7F,0x14}, /* #     */
+	{0x24,0x2A,0x7F,0x2A,0x12}, /* $     */
+	{0x23,0x13,0x08,0x64,0x62}, /* %     */
+	{0x36,0x49,0x55,0x22,0x50}, /* &     */
+	{0x00,0x05,0x03,0x00,0x00}, /* '     */
+	{0x00,0x1C,0x22,0x41,0x00}, /* (     */
+	{0x00,0x41,0x22,0x1C,0x00}, /* )     */
+	{0x08,0x2A,0x1C,0x2A,0x08}, /* *     */
+	{0x08,0x08,0x3E,0x08,0x08}, /* +     */
+	{0x00,0x50,0x30,0x00,0x00}, /* ,     */
+	{0x08,0x08,0x08,0x08,0x08}, /* -     */
+	{0x00,0x60,0x60,0x00,0x00}, /* .     */
+	{0x20,0x10,0x08,0x04,0x02}, /* /     */
+	{0x3E,0x51,0x49,0x45,0x3E}, /* 0     */
+	{0x00,0x42,0x7F,0x40,0x00}, /* 1     */
+	{0x42,0x61,0x51,0x49,0x46}, /* 2     */
+	{0x21,0x41,0x45,0x4B,0x31}, /* 3     */
+	{0x18,0x14,0x12,0x7F,0x10}, /* 4     */
+	{0x27,0x45,0x45,0x45,0x39}, /* 5     */
+	{0x3C,0x4A,0x49,0x49,0x30}, /* 6     */
+	{0x01,0x71,0x09,0x05,0x03}, /* 7     */
+	{0x36,0x49,0x49,0x49,0x36}, /* 8     */
+	{0x06,0x49,0x49,0x29,0x1E}, /* 9     */
+	{0x00,0x36,0x36,0x00,0x00}, /* :     */
+	{0x00,0x56,0x36,0x00,0x00}, /* ;     */
+	{0x00,0x08,0x14,0x22,0x41}, /* <     */
+	{0x14,0x14,0x14,0x14,0x14}, /* =     */
+	{0x41,0x22,0x14,0x08,0x00}, /* >     */
+	{0x02,0x01,0x51,0x09,0x06}, /* ?     */
+	{0x32,0x49,0x79,0x41,0x3E}, /* @     */
+	{0x7E,0x11,0x11,0x11,0x7E}, /* A     */
+	{0x7F,0x49,0x49,0x49,0x36}, /* B     */
+	{0x3E,0x41,0x41,0x41,0x22}, /* C     */
+	{0x7F,0x41,0x41,0x22,0x1C}, /* D     */
+	{0x7F,0x49,0x49,0x49,0x41}, /* E     */
+	{0x7F,0x09,0x09,0x09,0x01}, /* F     */
+	{0x3E,0x41,0x49,0x49,0x7A}, /* G     */
+	{0x7F,0x08,0x08,0x08,0x7F}, /* H     */
+	{0x00,0x41,0x7F,0x41,0x00}, /* I     */
+	{0x20,0x40,0x41,0x3F,0x01}, /* J     */
+	{0x7F,0x08,0x14,0x22,0x41}, /* K     */
+	{0x7F,0x40,0x40,0x40,0x40}, /* L     */
+	{0x7F,0x02,0x04,0x02,0x7F}, /* M     */
+	{0x7F,0x04,0x08,0x10,0x7F}, /* N     */
+	{0x3E,0x41,0x41,0x41,0x3E}, /* O     */
+	{0x7F,0x09,0x09,0x09,0x06}, /* P     */
+	{0x3E,0x41,0x51,0x21,0x5E}, /* Q     */
+	{0x7F,0x09,0x19,0x29,0x46}, /* R     */
+	{0x46,0x49,0x49,0x49,0x31}, /* S     */
+	{0x01,0x01,0x7F,0x01,0x01}, /* T     */
+	{0x3F,0x40,0x40,0x40,0x3F}, /* U     */
+	{0x1F,0x20,0x40,0x20,0x1F}, /* V     */
+	{0x3F,0x40,0x38,0x40,0x3F}, /* W     */
+	{0x63,0x14,0x08,0x14,0x63}, /* X     */
+	{0x07,0x08,0x70,0x08,0x07}, /* Y     */
+	{0x61,0x51,0x49,0x45,0x43}, /* Z     */
+};
+
+static void lcd_draw_char(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t bg, int scale)
+{
+	const uint8_t *bmp;
+	int col, row;
+
+	if (c < 32 || c > 90) {
+		c = 32;
+	}
+	bmp = lcd_font5x7[(uint8_t)c - 32];
+	for (col = 0; col < 5; col++) {
+		for (row = 0; row < 7; row++) {
+			uint16_t px = (bmp[col] >> row) & 1 ? color : bg;
+			lcd_fill_rect((uint16_t)(x + col * scale),
+				      (uint16_t)(y + row * scale),
+				      (uint16_t)scale, (uint16_t)scale, px);
+		}
+	}
+}
+
+static void lcd_draw_string(uint16_t x, uint16_t y, const char *str, uint16_t color, uint16_t bg, int scale)
+{
+	char c;
+
+	while (*str) {
+		c = *str;
+		if (c >= 'a' && c <= 'z') {
+			c = (char)(c - 32);
+		}
+		lcd_draw_char(x, y, c, color, bg, scale);
+		x = (uint16_t)(x + (5 + 1) * scale);
+		str++;
+	}
+}
+
+/* Renders the live pill slot data onto the LCD. Called from screen_task. */
+static void screen_draw_ui(const pico_bridge_state_t *snapshot)
+{
+	char buf[32];
+	int slot_index;
+	int si;
+	time_t now;
+	struct tm ti;
+	bool alert_fail;
+	bool alert_low;
+	uint16_t hdr_bg;
+	const char *badge_str;
+	uint16_t badge_color;
+
+	/* Scan slots for alert conditions before drawing */
+	alert_fail = false;
+	alert_low  = false;
+	for (si = 0; si < PILL_SLOT_COUNT; si++) {
+		const pill_slot_state_t *s = &snapshot->slots[si];
+		if (!s->is_active) continue;
+		if (strcmp(s->last_dispense_result, "fail") == 0 ||
+		    strcmp(s->last_dispense_result, "timeout") == 0) alert_fail = true;
+		if (s->pills_left >= 0 && s->pills_left < LOW_PILL_THRESHOLD) alert_low = true;
+	}
+
+	/* ── Title bar ───────────────────────────────────────────────── */
+	hdr_bg = alert_fail ? LCD_RED : LCD_DKGREY;
+	lcd_fill_rect(0, 0, SCREEN_W, 44, hdr_bg);
+	lcd_draw_string(8, 14, "PILL DISPENSER", LCD_CYAN, hdr_bg, 2);
+
+	/* HH:MM clock (top-right) */
+	now = time(NULL);
+	if (now > 1700000000 && localtime_r(&now, &ti) != NULL) {
+		snprintf(buf, sizeof(buf), "%02d:%02d", ti.tm_hour, ti.tm_min);
+	} else {
+		snprintf(buf, sizeof(buf), "--:--");
+	}
+	lcd_draw_string(410, 14, buf, LCD_YELLOW, hdr_bg, 2);
+
+	/* Connection / alert badge */
+	if (alert_fail) {
+		badge_str   = "FAIL!";
+		badge_color = LCD_WHITE;
+	} else if (!snapshot->connected) {
+		badge_str   = "WAIT";
+		badge_color = LCD_RED;
+	} else if (alert_low) {
+		badge_str   = "LOW";
+		badge_color = LCD_YELLOW;
+	} else {
+		badge_str   = "LIVE";
+		badge_color = LCD_GREEN;
+	}
+	lcd_draw_string(310, 14, badge_str, badge_color, hdr_bg, 2);
+
+	lcd_draw_hline(0, 44, SCREEN_W, LCD_CYAN);
+
+	/* ── Column headers ──────────────────────────────────────────── */
+	lcd_fill_rect(0, 46, SCREEN_W, 26, LCD_DKGREY);
+	lcd_draw_string(8,   52, "SLOT",   LCD_GREY, LCD_DKGREY, 2);
+	lcd_draw_string(57,  52, "MED",    LCD_GREY, LCD_DKGREY, 2);
+	lcd_draw_string(253, 52, "LEFT",   LCD_GREY, LCD_DKGREY, 2);
+	lcd_draw_string(317, 52, "DOSE",   LCD_GREY, LCD_DKGREY, 2);
+	lcd_draw_string(375, 52, "STATUS", LCD_GREY, LCD_DKGREY, 2);
+	lcd_draw_hline(0, 72, SCREEN_W, LCD_GREY);
+
+	/* ── One row per slot (5 rows × 48 px) ──────────────────────── */
+	for (slot_index = 0; slot_index < PILL_SLOT_COUNT; slot_index++) {
+		const pill_slot_state_t *slot = &snapshot->slots[slot_index];
+		uint16_t row_y      = (uint16_t)(74 + slot_index * 48);
+		uint16_t slot_col   = (snapshot->active_profile_slot == slot_index) ? LCD_CYAN : LCD_GREY;
+		const char *status_str;
+		uint16_t status_color;
+		int i;
+
+		lcd_fill_rect(0, row_y, SCREEN_W, 46, LCD_BLACK);
+
+		/* Slot label: S0 .. S4 */
+		buf[0] = 'S';
+		buf[1] = (char)('0' + slot_index);
+		buf[2] = '\0';
+		lcd_draw_string(8, (uint16_t)(row_y + 16), buf, slot_col, LCD_BLACK, 2);
+
+		/* Medication name — uppercase, capped at 16 chars */
+		if (slot->has_data) {
+			char med[17];
+			strncpy(med, slot->medication_name, 16);
+			med[16] = '\0';
+			for (i = 0; med[i]; i++) {
+				if (med[i] >= 'a' && med[i] <= 'z') {
+					med[i] = (char)(med[i] - 32);
+				}
+			}
+			lcd_draw_string(57, (uint16_t)(row_y + 16), med, LCD_WHITE, LCD_BLACK, 2);
+		} else {
+			lcd_draw_string(57, (uint16_t)(row_y + 16), "NO DATA", LCD_GREY, LCD_BLACK, 2);
+		}
+
+		/* Pills left — color-coded: red at 0, yellow near empty */
+		{
+			uint16_t pill_color = LCD_WHITE;
+			if (slot->pills_left >= 0) {
+				snprintf(buf, sizeof(buf), "%d", slot->pills_left);
+				if (slot->pills_left == 0) {
+					pill_color = LCD_RED;
+				} else if (slot->pills_left < LOW_PILL_THRESHOLD) {
+					pill_color = LCD_YELLOW;
+				}
+			} else {
+				snprintf(buf, sizeof(buf), "--");
+			}
+			lcd_draw_string(253, (uint16_t)(row_y + 16), buf, pill_color, LCD_BLACK, 2);
+		}
+
+		/* Pills per dose */
+		if (slot->pills_per_dose > 0) {
+			snprintf(buf, sizeof(buf), "%dX", slot->pills_per_dose);
+		} else {
+			snprintf(buf, sizeof(buf), "--");
+		}
+		lcd_draw_string(317, (uint16_t)(row_y + 16), buf, LCD_WHITE, LCD_BLACK, 2);
+
+		/* Dispense status */
+		if (!slot->is_active) {
+			status_str   = "INACTIVE";
+			status_color = LCD_GREY;
+		} else if (strcmp(slot->last_dispense_result, "ok") == 0) {
+			status_str   = "TAKEN";
+			status_color = LCD_GREEN;
+		} else if (strcmp(slot->last_dispense_result, "fail") == 0 ||
+		           strcmp(slot->last_dispense_result, "timeout") == 0) {
+			status_str   = slot->last_dispense_result[0] == 't' ? "NO-ACK" : "MISSED";
+			status_color = LCD_RED;
+		} else if (strcmp(slot->last_dispense_result, "pending") == 0) {
+			status_str   = "PENDING";
+			status_color = LCD_YELLOW;
+		} else {
+			status_str   = "WAITING";
+			status_color = LCD_YELLOW;
+		}
+		lcd_draw_string(375, (uint16_t)(row_y + 16), status_str, status_color, LCD_BLACK, 2);
+
+		lcd_draw_hline(0, (uint16_t)(row_y + 46), SCREEN_W, LCD_DKGREY);
+	}
+}
+
+static void screen_task(void *arg)
+{
+	pico_bridge_state_t *snapshot;
+
+	(void)arg;
+
+	snapshot = malloc(sizeof(*snapshot));
+	if (snapshot == NULL) {
+		ESP_LOGE(TAG, "screen_task: malloc failed");
+		vTaskDelete(NULL);
+		return;
+	}
+
+	/* Initial blank */
+	lcd_fill_rect(0, 0, SCREEN_W, SCREEN_H, LCD_BLACK);
+
+	while (1) {
+		memset(snapshot, 0, sizeof(*snapshot));
+		if (bridge_state_mutex != NULL &&
+		    xSemaphoreTake(bridge_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+			*snapshot = bridge_state;
+			xSemaphoreGive(bridge_state_mutex);
+		}
+		screen_draw_ui(snapshot);
+		vTaskDelay(pdMS_TO_TICKS(2000));
+	}
+
+	free(snapshot); /* unreachable */
+}
+
+static void start_lcd_display(void)
+{
+	spi_bus_config_t bus = {
+		.mosi_io_num     = LCD_MOSI,
+		.miso_io_num     = -1,
+		.sclk_io_num     = LCD_CLK,
+		.quadwp_io_num   = -1,
+		.quadhd_io_num   = -1,
+		.max_transfer_sz = SCREEN_W * 2,
+	};
+	spi_device_interface_config_t dev = {
+		.clock_speed_hz = 40 * 1000 * 1000,
+		.mode           = 0,
+		.spics_io_num   = LCD_CS,
+		.queue_size     = 7,
+	};
+
+	gpio_set_direction(LCD_BL,  GPIO_MODE_OUTPUT);
+	gpio_set_level(LCD_BL, 1);
+	gpio_set_direction(LCD_DC,  GPIO_MODE_OUTPUT);
+	gpio_set_direction(LCD_RST, GPIO_MODE_OUTPUT);
+	gpio_set_level(LCD_RST, 1);
+
+	ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &bus, SPI_DMA_CH_AUTO));
+	ESP_ERROR_CHECK(spi_bus_add_device(SPI3_HOST, &dev, &lcd_spi));
+
+	lcd_st7796_init();
+	xTaskCreate(screen_task, "screen_task", 8192, NULL, 2, NULL);
+	ESP_LOGI(TAG, "LCD display started on SPI3");
+}
 
 static void bridge_reset_slot_defaults(pill_slot_state_t *slot_state, int slot_number)
 {
@@ -497,11 +902,20 @@ static void bridge_update_connected_flag_locked(void)
 	if (bridge_state.awaiting_dispense_ack &&
 		bridge_state.dispense_ack_deadline_us > 0 &&
 		esp_timer_get_time() > bridge_state.dispense_ack_deadline_us) {
+		pill_slot_state_t *timed_out_slot = &bridge_state.slots[bridge_state.active_profile_slot];
 		bridge_state.awaiting_dispense_ack = false;
 		bridge_state.dispense_ack_deadline_us = 0;
 		bridge_copy_string(bridge_state.last_ack_result,
 				   sizeof(bridge_state.last_ack_result),
 				   "timeout");
+		/* Log the timeout as a failed dispense so history shows it */
+		bridge_copy_string(timed_out_slot->last_dispense_result,
+				   sizeof(timed_out_slot->last_dispense_result),
+				   "timeout");
+		bridge_copy_string(timed_out_slot->last_event,
+				   sizeof(timed_out_slot->last_event),
+				   "Dispense timed out - no ACK from Pico.");
+		bridge_log_status_locked(&bridge_state, timed_out_slot);
 	}
 
 	bridge_state.connected = bridge_state.last_update_us > 0 && age_us < UART_BRIDGE_TIMEOUT_US;
@@ -708,6 +1122,10 @@ static void start_uart_bridge(void)
 
 		bridge_state.connected = false;
 		bridge_state.last_update_us = 0;
+		/* Dispense-ack state is transient — never restore it across reboots.
+		 * The old deadline_us would be stale and the timeout would never fire. */
+		bridge_state.awaiting_dispense_ack = false;
+		bridge_state.dispense_ack_deadline_us = 0;
 		bridge_copy_string(bridge_state.controller_transport,
 					   sizeof(bridge_state.controller_transport),
 					   "UART bridge pending");
@@ -989,10 +1407,10 @@ static esp_err_t profile_post_handler(httpd_req_t *req)
 	slot_state->has_data = true;
 	bridge_copy_string(slot_state->medication_name, sizeof(slot_state->medication_name), medication_name);
 	bridge_copy_string(slot_state->schedule, sizeof(slot_state->schedule), schedule);
-	if (slot_state->pills_left < 0 || slot_state->pills_left > total_pills) {
-		slot_state->pills_left = total_pills;
-	}
-	slot_state->doses_remaining = dose > 0 && slot_state->pills_left >= 0 ? slot_state->pills_left / dose : -1;
+	/* Always reset to the new total — LOAD_PROFILE resets the Pico count to
+	 * total= anyway, so the ESP cache must always match after a profile save. */
+	slot_state->pills_left = total_pills;
+	slot_state->doses_remaining = dose > 0 ? total_pills / dose : -1;
 	bridge_copy_string(slot_state->notes, sizeof(slot_state->notes), "Profile saved on ESP and sent to Pico.");
 	bridge_state.active_profile_slot = slot_number;
 	bridge_state_save_to_nvs(&bridge_state);
@@ -1029,13 +1447,15 @@ static esp_err_t dispense_post_handler(httpd_req_t *req)
 		slot_number = bridge_state.active_profile_slot;
 	}
 
-	if (bridge_slot_index_from_number(slot_number) < 0 || !bridge_state.slots[slot_number].is_active) {
+	if (bridge_slot_index_from_number(slot_number) < 0) {
 		xSemaphoreGive(bridge_state_mutex);
-		return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or inactive slot");
+		return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid slot number");
 	}
 
-	bridge_send_dispense_for_slot(slot_number);
+	/* Update the active slot immediately so the UI reflects the intended target
+	 * even if the Pico is not connected and the dispense times out. */
 	bridge_state.active_profile_slot = slot_number;
+	bridge_send_dispense_for_slot(slot_number);
 	bridge_state.awaiting_dispense_ack = true;
 	bridge_state.dispense_ack_deadline_us = esp_timer_get_time() + DISPENSE_ACK_TIMEOUT_US;
 	bridge_copy_string(bridge_state.last_ack_action, sizeof(bridge_state.last_ack_action), "DISPENSE");
@@ -1077,18 +1497,24 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 	char time_buf[64];
 	char *response;
 	char *slots_json;
+	char *history_json;
 	pico_bridge_state_t *snapshot;
 	size_t slots_used = 0;
+	size_t hist_used  = 0;
+	bool has_fail = false;
+	bool has_low  = false;
 	const pill_slot_state_t *active_slot;
 	int slot_index;
 	esp_err_t result;
 
-	response = malloc(STATUS_RESPONSE_BUFFER_SIZE);
-	slots_json = malloc(STATUS_SLOTS_BUFFER_SIZE);
-	snapshot = malloc(sizeof(*snapshot));
-	if (response == NULL || slots_json == NULL || snapshot == NULL) {
+	response     = malloc(STATUS_RESPONSE_BUFFER_SIZE);
+	slots_json   = malloc(STATUS_SLOTS_BUFFER_SIZE);
+	history_json = malloc(HISTORY_JSON_BUFFER_SIZE);
+	snapshot     = malloc(sizeof(*snapshot));
+	if (response == NULL || slots_json == NULL || history_json == NULL || snapshot == NULL) {
 		free(response);
 		free(slots_json);
+		free(history_json);
 		free(snapshot);
 		ESP_LOGE(TAG, "Failed to allocate status response buffers");
 		return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
@@ -1132,6 +1558,26 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 	}
 	bridge_append_text(slots_json, STATUS_SLOTS_BUFFER_SIZE, &slots_used, "]");
 
+	/* Compute alert flags and build history JSON array (newest first) */
+	for (slot_index = 0; slot_index < PILL_SLOT_COUNT; slot_index++) {
+		const pill_slot_state_t *s = &snapshot->slots[slot_index];
+		if (!s->is_active) continue;
+		if (strcmp(s->last_dispense_result, "fail") == 0 ||
+		    strcmp(s->last_dispense_result, "timeout") == 0) has_fail = true;
+		if (s->pills_left >= 0 && s->pills_left < LOW_PILL_THRESHOLD) has_low = true;
+	}
+	bridge_append_text(history_json, HISTORY_JSON_BUFFER_SIZE, &hist_used, "[");
+	for (slot_index = snapshot->history_count - 1; slot_index >= 0; slot_index--) {
+		const dispense_history_entry_t *h = &snapshot->history[slot_index];
+		bridge_append_text(history_json, HISTORY_JSON_BUFFER_SIZE, &hist_used,
+				   "%s{\"slot\":%d,\"medication\":\"%s\",\"result\":\"%s\","
+				   "\"pills_left_after\":%d,\"event\":\"%s\",\"time\":%lld}",
+				   slot_index == snapshot->history_count - 1 ? "" : ",",
+				   h->slot_number, h->medication_name, h->result,
+				   h->pills_left_after, h->event, (long long)h->esp_timestamp);
+	}
+	bridge_append_text(history_json, HISTORY_JSON_BUFFER_SIZE, &hist_used, "]");
+
 	snprintf(response,
 			 STATUS_RESPONSE_BUFFER_SIZE,
 			 "{"
@@ -1158,6 +1604,9 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 			 "\"last_event\":\"%s\","
 			 "\"last_dispense_result\":\"%s\","
 			 "\"notes\":\"%s\","
+			 "\"dispense_fail\":%s,"
+			 "\"low_pill_warn\":%s,"
+			 "\"history\":%s,"
 			 "\"slots\":%s"
 			 "}",
 			 time_buf,
@@ -1177,12 +1626,16 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 			 active_slot->last_event,
 			 active_slot->last_dispense_result,
 			 active_slot->notes,
+			 json_bool(has_fail),
+			 json_bool(has_low),
+			 history_json,
 			 slots_json);
 
 	httpd_resp_set_type(req, "application/json");
 	result = httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
 	free(response);
 	free(slots_json);
+	free(history_json);
 	free(snapshot);
 	return result;
 }
@@ -1244,6 +1697,14 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		".control-actions{display:flex;flex-wrap:wrap;gap:10px;align-items:center;}"
 		".status-copy{font-size:.92rem;color:var(--muted);margin-top:10px;}"
 		".footer-card{padding:12px 14px;border-radius:16px;background:rgba(255,255,255,.58);border:1px solid rgba(255,255,255,.7);}"
+		".alert-banner{display:none;background:#fef2f2;border:1.5px solid #fca5a5;border-radius:16px;padding:14px 18px;color:#b91c1c;font-weight:700;margin-bottom:18px;}"
+		".alert-banner.visible{display:block;}"
+		".warn-banner{display:none;background:#fffbeb;border:1.5px solid #fcd34d;border-radius:16px;padding:14px 18px;color:#92400e;font-weight:700;margin-bottom:18px;}"
+		".warn-banner.visible{display:block;}"
+		".hist-table{width:100%;border-collapse:collapse;font-size:.9rem;}"
+		".hist-table th{text-align:left;color:var(--muted);font-size:.78rem;letter-spacing:.1em;text-transform:uppercase;padding:6px 4px;border-bottom:1px solid var(--line);}"
+		".hist-table td{padding:8px 4px;border-bottom:1px solid var(--line);}"
+		".hist-table tr:last-child td{border-bottom:none;}"
 		"@media (max-width:760px){.shell{padding:14px 14px 28px;}.hero{padding:20px;}}"
 		"</style></head><body>"
 		"<main class=\"shell\">"
@@ -1253,6 +1714,8 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"<p class=\"lede\">A focused view of the pill dispenser. This page only shows the connection to the Raspberry Pi Pico, the current pill profile, the current time, and the last dispense information.</p>"
 		"</section>"
 		"<div class=\"stack\">"
+		"<div id=\"fail-banner\" class=\"alert-banner\">&#9888; Dispense failure detected &mdash; check the dispenser.</div>"
+		"<div id=\"low-pill-banner\" class=\"warn-banner\">&#9888; Low pill count &mdash; one or more slots need refilling soon.</div>"
 		"<section class=\"panel\">"
 		"<div class=\"panel-head\">"
 		"<div><p class=\"panel-title\">Connection State</p><div id=\"bridge-copy\">The ESP page is up. Waiting for live Raspberry Pi Pico data.</div></div>"
@@ -1305,6 +1768,11 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"</div>"
 		"<div class=\"status-copy\" id=\"control-status\">No command sent yet.</div>"
 		"</section>"
+		"<section class=\"panel\" id=\"history-panel\" style=\"display:none\">"
+		"<div class=\"panel-head\"><div><p class=\"panel-title\">Dispense History</p><div>Most recent dispense events, newest first.</div></div></div>"
+		"<table class=\"hist-table\"><thead><tr><th>#</th><th>Slot</th><th>Medication</th><th>Result</th><th>Pills After</th><th>Time</th></tr></thead>"
+		"<tbody id=\"history-body\"><tr><td colspan=\"6\">No history yet.</td></tr></tbody></table>"
+		"</section>"
 		"<div class=\"footer\">"
 		"<div class=\"footer-card\">Wi-Fi SSID: ESP-Time-Server</div>"
 		"<div class=\"footer-card\">Password: Open network</div>"
@@ -1351,6 +1819,11 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"setActiveSlotCard(Number(d.active_profile_slot)||0);"
 		"if(d.awaiting_dispense_ack){setStatusCopy('Waiting for ACK: '+(d.last_ack_action||'command')+' / '+(d.last_ack_result||'pending'));}"
 		"setBridgeState(Boolean(d.bridge_connected),d.controller_transport);"
+		"const failBanner=document.getElementById('fail-banner');if(failBanner)failBanner.className='alert-banner'+(d.dispense_fail?' visible':'');"
+		"const lowBanner=document.getElementById('low-pill-banner');if(lowBanner)lowBanner.className='warn-banner'+(d.low_pill_warn?' visible':'');"
+		"const history=Array.isArray(d.history)?d.history:[];"
+		"const histPanel=document.getElementById('history-panel');if(histPanel)histPanel.style.display=history.length>0?'':'none';"
+		"const histBody=document.getElementById('history-body');if(histBody&&history.length>0){histBody.innerHTML=history.map((h,i)=>{const t=h.time>0?new Date(h.time*1000).toLocaleTimeString():'--';const res=h.result==='ok'?'Pass':h.result==='fail'?'Fail':h.result||'--';return '<tr><td>'+(i+1)+'</td><td>'+h.slot+'</td><td>'+(h.medication||'--')+'</td><td>'+res+'</td><td>'+displayNumber(h.pills_left_after)+'</td><td>'+t+'</td></tr>';}).join('');}"
 		"}catch(e){text('device-time','Disconnected');text('last-event','ESP status endpoint is unavailable.');setBridgeState(false,'ESP status unavailable');}"
 		"}"
 		"control('save-profile').addEventListener('click',()=>{saveProfile().catch(()=>setStatusCopy('Failed to save profile.'));});"
@@ -1527,6 +2000,7 @@ void app_main(void)
 	}
 	ESP_ERROR_CHECK(ret);
 
+	start_lcd_display();
 	start_uart_bridge();
 	start_wifi_ap();
 	start_captive_dns();
