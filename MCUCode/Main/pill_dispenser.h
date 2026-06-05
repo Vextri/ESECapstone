@@ -8,7 +8,7 @@
 #ifndef PILL_DISPENSER_H
 #define PILL_DISPENSER_H
 
-#include "motor_control.h"
+#include "stepper_control.h"
 #include "hardware/uart.h"
 #include <stdint.h>
 #include <stdbool.h>
@@ -126,7 +126,7 @@ void dispenser_test_mode(void);
  * @param timeout_ms Maximum time to wait for sensors (safety timeout)
  * @return true if pill was successfully dispensed, false if timeout or error
  */
-bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms);
+bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms, uint8_t motor_idx);
 
 /**
  * Execute a dose using sensor-based dispensing instead of timed dispensing

@@ -5,11 +5,14 @@
       "compilerPath": "C:\\Espressif\\tools\\xtensa-esp-elf\\esp-15.2.0_20251204\\xtensa-esp-elf\\bin\\xtensa-esp32s3-elf-gcc.exe",
       "compileCommands": "${config:idf.buildPath}/compile_commands.json",
       "includePath": [
-        "${workspaceFolder}/**"
+        "${workspaceFolder}/**",
+        "C:\\esp\\v6.0\\esp-idf\\components\\**",
+        "C:\\Espressif\\tools\\xtensa-esp-elf\\esp-15.2.0_20251204\\xtensa-esp-elf\\xtensa-esp32s3-elf\\include"
       ],
       "browse": {
         "path": [
-          "${workspaceFolder}"
+          "${workspaceFolder}",
+          "C:\\esp\\v6.0\\esp-idf\\components"
         ],
         "limitSymbolsToIncludedHeaders": true
       }

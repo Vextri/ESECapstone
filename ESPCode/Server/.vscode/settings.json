@@ -12,7 +12,7 @@
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=d:\\Conestoga\\Cap\\ESECapstone\\ESPCode\\Server\\build"
+    "--compile-commands-dir=${workspaceFolder}/build"
   ],
   "idf.flashType": "UART"
 }

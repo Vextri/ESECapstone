@@ -4,7 +4,6 @@
 #include <stdint.h>
 
 // Full-step sequence for bipolar stepper via DRV8833 dual H-bridge.
-// Both coils are always energized for maximum torque.
 // Columns: AIN1, AIN2, BIN1, BIN2
 static const uint8_t full_step_seq[4][4] = {
     {1, 0, 1, 0},   // A+, B+
@@ -13,80 +12,102 @@ static const uint8_t full_step_seq[4][4] = {
     {1, 0, 0, 1},   // A+, B-
 };
 
-static const uint stepper_pins[4] = {
-    STEPPER_AIN1_PIN,
-    STEPPER_AIN2_PIN,
-    STEPPER_BIN1_PIN,
-    STEPPER_BIN2_PIN,
+// Pin layout for each motor: {AIN1, AIN2, BIN1, BIN2}
+typedef struct {
+    uint ain1;
+    uint ain2;
+    uint bin1;
+    uint bin2;
+} stepper_pin_cfg_t;
+
+static const stepper_pin_cfg_t pin_cfg[STEPPER_MOTOR_COUNT] = {
+    { 8,  9, 10, 11},  // Motor 1: main dispenser
+    { 0,  1,  2,  3},  // Motor 2: reuses old DC motor GPIOs (GPIO1=AIN1, GPIO2=AIN2)
+    {12, 13, 14, 15},  // Motor 3: dispenser 3
 };
 
-static int8_t              s_step_index  = 0;
-static stepper_direction_t s_direction   = STEPPER_IDLE;
-static uint32_t            s_step_count  = 0;
-static absolute_time_t     s_next_step_time;
+// Per-motor runtime state
+typedef struct {
+    int8_t              step_index;
+    stepper_direction_t direction;
+    uint32_t            step_count;
+    absolute_time_t     next_step_time;
+} stepper_state_t;
 
-static void apply_step(int8_t index) {
-    for (int i = 0; i < 4; i++) {
-        gpio_put(stepper_pins[i], full_step_seq[index][i]);
-    }
+static stepper_state_t motors[STEPPER_MOTOR_COUNT];
+
+static void apply_step(uint8_t m, int8_t step) {
+    gpio_put(pin_cfg[m].ain1, full_step_seq[step][0]);
+    gpio_put(pin_cfg[m].ain2, full_step_seq[step][1]);
+    gpio_put(pin_cfg[m].bin1, full_step_seq[step][2]);
+    gpio_put(pin_cfg[m].bin2, full_step_seq[step][3]);
 }
 
-static void deenergize(void) {
-    for (int i = 0; i < 4; i++) {
-        gpio_put(stepper_pins[i], 0);
-    }
+static void deenergize(uint8_t m) {
+    gpio_put(pin_cfg[m].ain1, 0);
+    gpio_put(pin_cfg[m].ain2, 0);
+    gpio_put(pin_cfg[m].bin1, 0);
+    gpio_put(pin_cfg[m].bin2, 0);
 }
 
 void stepper_init(void) {
-    for (int i = 0; i < 4; i++) {
-        gpio_init(stepper_pins[i]);
-        gpio_set_dir(stepper_pins[i], GPIO_OUT);
-        gpio_put(stepper_pins[i], 0);
+    for (uint8_t m = 0; m < STEPPER_MOTOR_COUNT; m++) {
+        uint pins[4] = {
+            pin_cfg[m].ain1, pin_cfg[m].ain2,
+            pin_cfg[m].bin1, pin_cfg[m].bin2
+        };
+        for (int p = 0; p < 4; p++) {
+            gpio_init(pins[p]);
+            gpio_set_dir(pins[p], GPIO_OUT);
+            gpio_put(pins[p], 0);
+        }
+        motors[m].step_index     = 0;
+        motors[m].direction      = STEPPER_IDLE;
+        motors[m].step_count     = 0;
+        motors[m].next_step_time = get_absolute_time();
     }
-    s_step_index     = 0;
-    s_direction      = STEPPER_IDLE;
-    s_step_count     = 0;
-    s_next_step_time = get_absolute_time();
 }
 
-void stepper_set_direction(stepper_direction_t direction) {
-    s_direction      = direction;
-    s_next_step_time = get_absolute_time(); // step immediately on next task() call
+void stepper_set_direction(uint8_t motor_idx, stepper_direction_t direction) {
+    if (motor_idx >= STEPPER_MOTOR_COUNT) return;
+    motors[motor_idx].direction      = direction;
+    motors[motor_idx].next_step_time = get_absolute_time();
 }
 
-void stepper_stop(void) {
-    s_direction = STEPPER_IDLE;
-    deenergize();
+void stepper_stop(uint8_t motor_idx) {
+    if (motor_idx >= STEPPER_MOTOR_COUNT) return;
+    motors[motor_idx].direction = STEPPER_IDLE;
+    deenergize(motor_idx);
 }
 
 void stepper_task(void) {
-    if (s_direction == STEPPER_IDLE) {
-        return;
-    }
+    for (uint8_t m = 0; m < STEPPER_MOTOR_COUNT; m++) {
+        if (motors[m].direction == STEPPER_IDLE) continue;
+        if (absolute_time_diff_us(get_absolute_time(), motors[m].next_step_time) > 0) continue;
 
-    if (absolute_time_diff_us(get_absolute_time(), s_next_step_time) > 0) {
-        return; // not yet time for next step
-    }
+        if (motors[m].direction == STEPPER_FORWARD) {
+            motors[m].step_index = (motors[m].step_index + 1) & 3;
+        } else {
+            motors[m].step_index = (motors[m].step_index + 3) & 3;
+        }
 
-    if (s_direction == STEPPER_FORWARD) {
-        s_step_index = (s_step_index + 1) & 3;
-    } else {
-        s_step_index = (s_step_index + 3) & 3; // subtract 1 mod 4
+        apply_step(m, motors[m].step_index);
+        motors[m].step_count++;
+        motors[m].next_step_time = delayed_by_us(get_absolute_time(), STEPPER_STEP_DELAY_US);
     }
-
-    apply_step(s_step_index);
-    s_step_count++;
-    s_next_step_time = delayed_by_us(get_absolute_time(), STEPPER_STEP_DELAY_US);
 }
 
-stepper_direction_t stepper_get_direction(void) {
-    return s_direction;
+stepper_direction_t stepper_get_direction(uint8_t motor_idx) {
+    if (motor_idx >= STEPPER_MOTOR_COUNT) return STEPPER_IDLE;
+    return motors[motor_idx].direction;
 }
 
-uint32_t stepper_get_step_count(void) {
-    return s_step_count;
+uint32_t stepper_get_step_count(uint8_t motor_idx) {
+    if (motor_idx >= STEPPER_MOTOR_COUNT) return 0;
+    return motors[motor_idx].step_count;
 }
 
-void stepper_reset_count(void) {
-    s_step_count = 0;
+void stepper_reset_count(uint8_t motor_idx) {
+    if (motor_idx >= STEPPER_MOTOR_COUNT) return;
+    motors[motor_idx].step_count = 0;
 }

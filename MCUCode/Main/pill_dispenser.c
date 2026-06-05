@@ -14,6 +14,15 @@
 static dispense_profile_t profiles[MAX_PROFILES];
 static int8_t current_profile_slot = -1;
 
+// Maps a profile slot number to its assigned stepper motor index.
+// Slot 0 -> Motor 1, Slot 1 -> Motor 2, Slot 2 -> Motor 3.
+// Slots beyond STEPPER_MOTOR_COUNT clamp to the last motor.
+static uint8_t slot_to_motor(int8_t slot) {
+    if (slot < 0) return STEPPER_MOTOR_1;
+    if ((uint8_t)slot >= STEPPER_MOTOR_COUNT) return STEPPER_MOTOR_COUNT - 1;
+    return (uint8_t)slot;
+}
+
 static void format_status_timestamp(char *buffer, size_t buffer_size) {
     uint32_t uptime_seconds = to_ms_since_boot(get_absolute_time()) / 1000;
     uint32_t hours = uptime_seconds / 3600;
@@ -71,7 +80,7 @@ void dispenser_init(void) {
     uart_set_format(ESP_UART, 8, 1, UART_PARITY_NONE);
     uart_set_hw_flow(ESP_UART, false, false);
 
-    motor_init();
+    stepper_init();
     
     // Initialize all profile slots as empty
     for (int i = 0; i < MAX_PROFILES; i++) {
@@ -274,9 +283,14 @@ bool dispenser_execute_dose(void) {
     for (int i = 0; i < profile->pills_per_dose; i++) {
         printf("Dispensing pill %d/%d\n", i + 1, profile->pills_per_dose);
         
-        motor_forward();
-        sleep_ms(profile->dispense_time_ms);
-        motor_stop();
+        uint8_t motor_idx = slot_to_motor(current_profile_slot);
+        stepper_set_direction(motor_idx, STEPPER_FORWARD);
+        uint32_t step_end = to_ms_since_boot(get_absolute_time()) + profile->dispense_time_ms;
+        while (to_ms_since_boot(get_absolute_time()) < step_end) {
+            stepper_task();
+            sleep_ms(1);
+        }
+        stepper_stop(motor_idx);
         
         profile->pills_remaining--;
         
@@ -372,8 +386,9 @@ void dispenser_test_mode(void) {
     printf("===============================\n");
 }
 
-bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms) {
-    printf("Starting sensor-based pill dispense (timeout: %dms)...\n", timeout_ms);
+bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms, uint8_t motor_idx) {
+    printf("Starting sensor-based pill dispense on Motor %d (timeout: %dms)...\n",
+           motor_idx + 1, timeout_ms);
 
     // Ensure piezo, IR, and hall effect are enabled
     if (!piezo_is_enabled()) piezo_enable();
@@ -385,10 +400,14 @@ bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms) {
     for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         if (attempt > 1) {
             printf("--- Retry attempt %d/%d ---\n", attempt, MAX_RETRIES);
-            printf("Reversing motor for 1 second before retry...\n");
-            motor_backward();
-            sleep_ms(1000);
-            motor_stop();
+            printf("Reversing Motor %d for 1 second before retry...\n", motor_idx + 1);
+            stepper_set_direction(motor_idx, STEPPER_BACKWARD);
+            uint32_t rev_end = to_ms_since_boot(get_absolute_time()) + 1000;
+            while (to_ms_since_boot(get_absolute_time()) < rev_end) {
+                stepper_task();
+                sleep_ms(1);
+            }
+            stepper_stop(motor_idx);
             sleep_ms(500);
         }
 
@@ -399,9 +418,9 @@ bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms) {
 
         uint32_t start_time = to_ms_since_boot(get_absolute_time());
 
-        // Start motor - piezo will stop it when pill impact is detected
-        printf("Motor starting (attempt %d)...\n", attempt);
-        motor_forward();
+        // Start stepper - piezo will stop it when pill impact is detected
+        printf("Motor %d starting (attempt %d)...\n", motor_idx + 1, attempt);
+        stepper_set_direction(motor_idx, STEPPER_FORWARD);
 
         // Wait for piezo to detect pill impact
         while (true) {
@@ -409,16 +428,17 @@ bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms) {
             if (now - start_time > timeout_ms) {
                 printf("TIMEOUT: Piezo did not trigger within %dms (attempt %d/%d)\n",
                        timeout_ms, attempt, MAX_RETRIES);
-                motor_stop();
+                stepper_stop(motor_idx);
                 break;  // Treat as failed attempt, retry up to MAX_RETRIES
             }
 
             if (piezo_get_count() > 0) {
-                motor_stop();
-                printf("Pill impact detected - motor stopped.\n");
+                stepper_stop(motor_idx);
+                printf("Pill impact detected - Motor %d stopped.\n", motor_idx + 1);
                 break;
             }
 
+            stepper_task();
             sleep_ms(5);
         }
 
@@ -469,6 +489,8 @@ bool dispenser_execute_dose_sensor_based(void) {
     printf("\n=== SENSOR-BASED DOSE DISPENSING ===\n");
     printf("Dispensing %d pills of %s (Slot %d)...\n", 
            profile->pills_per_dose, profile->medication_name, current_profile_slot);
+    uint8_t motor_idx = slot_to_motor(current_profile_slot);
+    printf("Motor %d assigned to slot %d.\n", motor_idx + 1, current_profile_slot);
     printf("Motor runs until piezo detects impact, IR confirms pill dispensed.\n\n");
 
     // Dispense each pill using sensor feedback
@@ -478,7 +500,7 @@ bool dispenser_execute_dose_sensor_based(void) {
         printf("--- Dispensing pill %d/%d ---\n", i + 1, profile->pills_per_dose);
         
         // Use sensor-based dispensing with 10 second timeout per pill
-        if (dispenser_dispense_single_pill_sensor_based(10000)) {
+        if (dispenser_dispense_single_pill_sensor_based(10000, motor_idx)) {
             profile->pills_remaining--;
             pills_dispensed++;
             printf("Pill %d successfully dispensed! Remaining: %d\n", 

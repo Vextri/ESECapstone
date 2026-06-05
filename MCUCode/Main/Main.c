@@ -11,7 +11,6 @@
 #include "pico/stdlib.h"
 #include "pico/stdio.h"
 #include "pico/error.h"
-#include "motor_control.h"
 #include "pill_dispenser.h"
 #include "sensor_interrupts.h"
 #include "stepper_control.h"
@@ -49,9 +48,6 @@ int main() {
     
     // Initialize pill dispenser system (includes motor init and ESP UART init)
     dispenser_init();
-
-    // Initialize stepper motor
-    stepper_init();
     
     // Initialize sensor interrupt system
     sensor_interrupts_init();
@@ -85,14 +81,18 @@ int main() {
     printf("G - Test GPIO states\n");
     printf("V - Monitor all sensor GPIOs continuously\n");
     printf("C - Debug interrupt configuration\n");
-    printf("--- Manual Motor Control ---\n");
-    printf("W - Motor forward\n");
-    printf("N - Motor backward\n");
-    printf("X - Motor stop\n");
-    printf("--- Stepper Motor Control ---\n");
-    printf("A - Stepper forward (continuous)\n");
-    printf("Z - Stepper backward (continuous)\n");
-    printf("E - Stepper stop\n");
+    printf("--- Motor 1 (Main Dispenser) ---\n");
+    printf("W - Motor 1 forward\n");
+    printf("N - Motor 1 backward\n");
+    printf("X - Motor 1 stop\n");
+    printf("--- Motor 2 ---\n");
+    printf("A - Motor 2 forward\n");
+    printf("Z - Motor 2 backward\n");
+    printf("E - Motor 2 stop\n");
+    printf("--- Motor 3 ---\n");
+    printf("J - Motor 3 forward\n");
+    printf("U - Motor 3 backward\n");
+    printf("Y - Motor 3 stop\n");
     printf("Q - Quit\n");
     printf("==============================\n\n");
 
@@ -289,48 +289,69 @@ int main() {
                     sensor_interrupts_debug_config();
                     break;
                     
-                // Manual motor control for testing/debugging
+                // Motor 1 (main dispenser) manual control
                 case 'w':
                 case 'W':
-                    printf("Manual motor forward\n");
-                    motor_forward();
+                    printf("Motor 1 forward\n");
+                    stepper_set_direction(STEPPER_MOTOR_1, STEPPER_FORWARD);
                     break;
                     
                 case 'n':
                 case 'N':
-                    printf("Manual motor backward\n");
-                    motor_backward();
+                    printf("Motor 1 backward\n");
+                    stepper_set_direction(STEPPER_MOTOR_1, STEPPER_BACKWARD);
                     break;
 
                 case 'x':
                 case 'X':
-                    printf("Manual motor stop\n");
-                    motor_stop();
+                    printf("Motor 1 stop (steps: %lu)\n", stepper_get_step_count(STEPPER_MOTOR_1));
+                    stepper_stop(STEPPER_MOTOR_1);
                     break;
 
-                // Stepper motor control
+                // Motor 2 manual control
                 case 'a':
                 case 'A':
-                    printf("Stepper forward\n");
-                    stepper_set_direction(STEPPER_FORWARD);
+                    printf("Motor 2 forward\n");
+                    stepper_set_direction(STEPPER_MOTOR_2, STEPPER_FORWARD);
                     break;
 
                 case 'z':
                 case 'Z':
-                    printf("Stepper backward\n");
-                    stepper_set_direction(STEPPER_BACKWARD);
+                    printf("Motor 2 backward\n");
+                    stepper_set_direction(STEPPER_MOTOR_2, STEPPER_BACKWARD);
                     break;
 
                 case 'e':
                 case 'E':
-                    printf("Stepper stop (steps: %lu)\n", stepper_get_step_count());
-                    stepper_stop();
+                    printf("Motor 2 stop (steps: %lu)\n", stepper_get_step_count(STEPPER_MOTOR_2));
+                    stepper_stop(STEPPER_MOTOR_2);
+                    break;
+
+                // Motor 3 manual control
+                case 'j':
+                case 'J':
+                    printf("Motor 3 forward\n");
+                    stepper_set_direction(STEPPER_MOTOR_3, STEPPER_FORWARD);
+                    break;
+
+                case 'u':
+                case 'U':
+                    printf("Motor 3 backward\n");
+                    stepper_set_direction(STEPPER_MOTOR_3, STEPPER_BACKWARD);
+                    break;
+
+                case 'y':
+                case 'Y':
+                    printf("Motor 3 stop (steps: %lu)\n", stepper_get_step_count(STEPPER_MOTOR_3));
+                    stepper_stop(STEPPER_MOTOR_3);
                     break;
 
                 case 'q':
                 case 'Q':
                     printf("Shutting down dispenser...\n");
-                    motor_stop();
+                    stepper_stop(STEPPER_MOTOR_1);
+                    stepper_stop(STEPPER_MOTOR_2);
+                    stepper_stop(STEPPER_MOTOR_3);
                     return 0;
                     
                 default:

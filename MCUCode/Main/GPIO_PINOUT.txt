@@ -1,0 +1,49 @@
+============================================================
+  PILL DISPENSER - GPIO PIN ASSIGNMENTS
+============================================================
+
+--- STEPPER MOTOR 1 (Main Dispenser / Slot 0) ---
+  GPIO  8  ->  DRV8833 AIN1  (Coil A+)
+  GPIO  9  ->  DRV8833 AIN2  (Coil A-)
+  GPIO 10  ->  DRV8833 BIN1  (Coil B+)
+  GPIO 11  ->  DRV8833 BIN2  (Coil B-)
+
+--- STEPPER MOTOR 2 (Dispenser 2 / Slot 1) ---
+  GPIO  0  ->  DRV8833 AIN1  (Coil A+)
+  GPIO  1  ->  DRV8833 AIN2  (Coil A-)  [formerly DC motor AIN1]
+  GPIO  2  ->  DRV8833 BIN1  (Coil B+)  [formerly DC motor AIN2]
+  GPIO  3  ->  DRV8833 BIN2  (Coil B-)
+
+--- STEPPER MOTOR 3 (Dispenser 3 / Slot 2) ---
+  GPIO 12  ->  DRV8833 AIN1  (Coil A+)
+  GPIO 13  ->  DRV8833 AIN2  (Coil A-)
+  GPIO 14  ->  DRV8833 BIN1  (Coil B+)
+  GPIO 15  ->  DRV8833 BIN2  (Coil B-)
+
+--- SENSORS ---
+  GPIO  5  ->  Piezo sensor
+  GPIO  6  ->  Hall effect sensor
+  GPIO  7  ->  IR sensor
+
+--- ESP UART (uart1) ---
+  GPIO 20  ->  TX  (Pico -> ESP)
+  GPIO 21  ->  RX  (ESP  -> Pico)
+
+============================================================
+  SLOT -> MOTOR MAPPING
+============================================================
+  Slot 0  ->  Motor 1  (GPIO  8-11)
+  Slot 1  ->  Motor 2  (GPIO  0-3)
+  Slot 2  ->  Motor 3  (GPIO 12-15)
+  Slot 3  ->  Motor 3  (clamped)
+  Slot 4  ->  Motor 3  (clamped)
+
+============================================================
+  FREE / UNASSIGNED GPIOs
+============================================================
+  GPIO  4
+  GPIO 16 - 19
+  GPIO 22
+  GPIO 26 - 28  (ADC capable)
+
+============================================================
