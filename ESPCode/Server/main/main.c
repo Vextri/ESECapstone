@@ -2,7 +2,9 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdint.h>
+#include <stddef.h>
 #include <string.h>
+#include <math.h>
 #include <sys/time.h>
 #include <time.h>
 #include <stdbool.h>
@@ -23,6 +25,8 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "driver/spi_master.h"
+#include "driver/i2s_std.h"
+#include "driver/rmt_tx.h"
 
 static const char *TAG = "time_server";
 
@@ -52,6 +56,38 @@ static const char *TAG = "time_server";
 #define BRIDGE_NVS_NAMESPACE "bridge_state"
 #define HTTP_BODY_BUFFER_SIZE 512
 #define DISPENSE_ACK_TIMEOUT_US (40 * 1000000LL)
+
+#define AUDIO_I2S_BCLK_GPIO GPIO_NUM_16
+#define AUDIO_I2S_WS_GPIO   GPIO_NUM_17
+#define AUDIO_I2S_DOUT_GPIO GPIO_NUM_18
+#define AUDIO_SAMPLE_RATE   22050
+#define AUDIO_AMPLITUDE     14000
+#define AUDIO_BUFFER_SAMPLES 192
+
+#define AUDIO_NOTE_WHOLE_MS     640
+#define AUDIO_NOTE_HALF_MS      320
+#define AUDIO_NOTE_QUARTER_MS   160
+#define AUDIO_NOTE_EIGHTH_MS     80
+
+#define AUDIO_FREQ_REST 0.0f
+#define AUDIO_FREQ_A3   220.00f
+#define AUDIO_FREQ_C4   261.63f
+#define AUDIO_FREQ_E4   329.63f
+#define AUDIO_FREQ_G4   392.00f
+#define AUDIO_FREQ_A4   440.00f
+#define AUDIO_FREQ_C5   523.25f
+
+#define LED_WS2812_GPIO GPIO_NUM_9
+#define LED_COUNT 3
+#define LED_FLASH_ON_MS 140
+#define LED_FLASH_OFF_MS 120
+#define LED_EDIT_R 140
+#define LED_EDIT_G 0
+#define LED_EDIT_B 180
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
 
 typedef struct {
 	int pills_left;
@@ -91,6 +127,8 @@ typedef struct {
 	bool awaiting_dispense_ack;
 	int64_t dispense_ack_deadline_us;
 	int64_t last_update_us;
+	int dispense_queue[PILL_SLOT_COUNT];
+	int dispense_queue_count;
 } pico_bridge_state_t;
 
 static SemaphoreHandle_t bridge_state_mutex;
@@ -111,6 +149,8 @@ static pico_bridge_state_t bridge_state;
 #define BTN_DOWN_PIN 39
 #define BTN_SEL_PIN  40
 #define BTN_LONG_MS  700
+#define UI_INACTIVITY_TIMEOUT_MS 20000
+#define UI_VISIBLE_SLOT_COUNT 3
 
 #define SCREEN_W  480
 #define SCREEN_H  320
@@ -126,6 +166,356 @@ static pico_bridge_state_t bridge_state;
 
 static spi_device_handle_t lcd_spi;
 static uint8_t lcd_row_buf[SCREEN_W * 2];
+
+typedef struct {
+	float freq;
+	int dur_ms;
+} audio_note_t;
+
+typedef enum {
+	AUDIO_EVENT_SUCCESS = 1,
+	AUDIO_EVENT_FAILURE = 2,
+	AUDIO_EVENT_EDIT_BEGIN = 3,
+} audio_event_t;
+
+static QueueHandle_t audio_event_queue;
+static i2s_chan_handle_t audio_i2s_tx;
+
+typedef enum {
+	LED_EVENT_SUCCESS = 1,
+	LED_EVENT_FAILURE = 2,
+	LED_EVENT_EDIT_BEGIN = 3,
+	LED_EVENT_EDIT_END = 4,
+} led_event_t;
+
+typedef struct {
+	led_event_t event;
+	int slot;
+} led_event_msg_t;
+
+typedef struct {
+	uint8_t r;
+	uint8_t g;
+	uint8_t b;
+} led_pixel_t;
+
+static QueueHandle_t led_event_queue;
+static rmt_channel_handle_t led_rmt_chan;
+static rmt_encoder_handle_t led_rmt_encoder;
+static led_pixel_t led_pixels[LED_COUNT];
+
+static const audio_note_t success_melody[] = {
+	{AUDIO_FREQ_C4, AUDIO_NOTE_EIGHTH_MS},
+	{AUDIO_FREQ_E4, AUDIO_NOTE_EIGHTH_MS},
+	{AUDIO_FREQ_G4, AUDIO_NOTE_EIGHTH_MS},
+	{AUDIO_FREQ_C5, AUDIO_NOTE_HALF_MS},
+};
+
+static const audio_note_t failure_melody[] = {
+	{AUDIO_FREQ_A4, AUDIO_NOTE_QUARTER_MS},
+	{AUDIO_FREQ_E4, AUDIO_NOTE_QUARTER_MS},
+	{AUDIO_FREQ_C4, AUDIO_NOTE_HALF_MS},
+	{AUDIO_FREQ_A3, AUDIO_NOTE_EIGHTH_MS},
+	{AUDIO_FREQ_REST, AUDIO_NOTE_EIGHTH_MS},
+	{AUDIO_FREQ_A3, AUDIO_NOTE_EIGHTH_MS},
+};
+
+static const audio_note_t edit_start_melody[] = {
+	{AUDIO_FREQ_C5, AUDIO_NOTE_EIGHTH_MS},
+	{AUDIO_FREQ_G4, AUDIO_NOTE_EIGHTH_MS},
+};
+
+static void audio_enqueue_event(audio_event_t event)
+{
+	if (audio_event_queue == NULL) {
+		return;
+	}
+
+	if (xQueueSend(audio_event_queue, &event, 0) != pdTRUE) {
+		ESP_LOGW(TAG, "Audio event queue full, dropping tone event=%d", (int)event);
+	}
+}
+
+static void audio_play_silence(i2s_chan_handle_t tx, int dur_ms)
+{
+	int16_t buf[AUDIO_BUFFER_SAMPLES * 2] = {0};
+	int total_samples = (int)(((int64_t)AUDIO_SAMPLE_RATE * dur_ms) / 1000);
+	size_t written = 0;
+
+	while (total_samples > 0) {
+		int chunk = total_samples < AUDIO_BUFFER_SAMPLES ? total_samples : AUDIO_BUFFER_SAMPLES;
+		i2s_channel_write(tx, buf, chunk * 4, &written, portMAX_DELAY);
+		total_samples -= chunk;
+	}
+}
+
+static void audio_play_note(i2s_chan_handle_t tx, float freq, int dur_ms)
+{
+	int tone_ms = dur_ms > 25 ? (dur_ms - 20) : dur_ms;
+	int rest_ms = dur_ms - tone_ms;
+	int total_samples = (int)(((int64_t)AUDIO_SAMPLE_RATE * tone_ms) / 1000);
+	int16_t buf[AUDIO_BUFFER_SAMPLES * 2];
+	uint32_t sample_pos = 0;
+	size_t written = 0;
+
+	while (total_samples > 0) {
+		int chunk = total_samples < AUDIO_BUFFER_SAMPLES ? total_samples : AUDIO_BUFFER_SAMPLES;
+
+		for (int i = 0; i < chunk; i++) {
+			int16_t v = (freq > 0.0f)
+				? (int16_t)(AUDIO_AMPLITUDE * sinf((2.0f * (float)M_PI * freq * sample_pos) / AUDIO_SAMPLE_RATE))
+				: 0;
+			buf[i * 2] = v;
+			buf[i * 2 + 1] = v;
+			sample_pos++;
+		}
+
+		i2s_channel_write(tx, buf, chunk * 4, &written, portMAX_DELAY);
+		total_samples -= chunk;
+	}
+
+	if (rest_ms > 0) {
+		audio_play_silence(tx, rest_ms);
+	}
+}
+
+static void audio_play_melody(i2s_chan_handle_t tx, const audio_note_t *notes, size_t count)
+{
+	for (size_t i = 0; i < count; i++) {
+		audio_play_note(tx, notes[i].freq, notes[i].dur_ms);
+	}
+}
+
+static void audio_task(void *arg)
+{
+	audio_event_t event;
+	i2s_chan_handle_t tx = (i2s_chan_handle_t)arg;
+
+	while (1) {
+		if (xQueueReceive(audio_event_queue, &event, portMAX_DELAY) != pdTRUE) {
+			continue;
+		}
+
+		if (event == AUDIO_EVENT_SUCCESS) {
+			audio_play_melody(tx, success_melody, sizeof(success_melody) / sizeof(success_melody[0]));
+		} else if (event == AUDIO_EVENT_FAILURE) {
+			audio_play_melody(tx, failure_melody, sizeof(failure_melody) / sizeof(failure_melody[0]));
+		} else if (event == AUDIO_EVENT_EDIT_BEGIN) {
+			audio_play_melody(tx, edit_start_melody, sizeof(edit_start_melody) / sizeof(edit_start_melody[0]));
+		}
+	}
+}
+
+static void start_audio_feedback(void)
+{
+	i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+	i2s_std_config_t std_cfg;
+
+	audio_event_queue = xQueueCreate(8, sizeof(audio_event_t));
+	if (audio_event_queue == NULL) {
+		ESP_LOGE(TAG, "Failed to create audio event queue");
+		return;
+	}
+
+	chan_cfg.auto_clear = true;
+	if (i2s_new_channel(&chan_cfg, &audio_i2s_tx, NULL) != ESP_OK) {
+		ESP_LOGE(TAG, "Failed to create I2S channel for audio");
+		return;
+	}
+
+	std_cfg = (i2s_std_config_t){
+		.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(AUDIO_SAMPLE_RATE),
+		.slot_cfg = I2S_STD_MSB_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+		.gpio_cfg = {
+			.mclk = I2S_GPIO_UNUSED,
+			.bclk = AUDIO_I2S_BCLK_GPIO,
+			.ws = AUDIO_I2S_WS_GPIO,
+			.dout = AUDIO_I2S_DOUT_GPIO,
+			.din = I2S_GPIO_UNUSED,
+			.invert_flags = {
+				.mclk_inv = false,
+				.bclk_inv = false,
+				.ws_inv = false,
+			},
+		},
+	};
+
+	if (i2s_channel_init_std_mode(audio_i2s_tx, &std_cfg) != ESP_OK) {
+		ESP_LOGE(TAG, "Failed to init I2S std mode for audio");
+		return;
+	}
+
+	if (i2s_channel_enable(audio_i2s_tx) != ESP_OK) {
+		ESP_LOGE(TAG, "Failed to enable I2S TX for audio");
+		return;
+	}
+
+	xTaskCreatePinnedToCore(audio_task, "audio_task", 4096, audio_i2s_tx, 4, NULL, 1);
+	ESP_LOGI(TAG, "Audio feedback ready on I2S BCLK=%d WS=%d DOUT=%d",
+		 (int)AUDIO_I2S_BCLK_GPIO, (int)AUDIO_I2S_WS_GPIO, (int)AUDIO_I2S_DOUT_GPIO);
+}
+
+static void led_ws2812_show(void)
+{
+	static const rmt_symbol_word_t bit0 = {
+		.level0 = 1, .duration0 = 4,
+		.level1 = 0, .duration1 = 9,
+	};
+	static const rmt_symbol_word_t bit1 = {
+		.level0 = 1, .duration0 = 8,
+		.level1 = 0, .duration1 = 5,
+	};
+	rmt_symbol_word_t symbols[LED_COUNT * 24 + 1];
+	rmt_transmit_config_t tx_cfg = {.loop_count = 0};
+	int idx = 0;
+
+	for (int led = 0; led < LED_COUNT; led++) {
+		uint8_t grb[3] = {led_pixels[led].g, led_pixels[led].r, led_pixels[led].b};
+		for (int byte = 0; byte < 3; byte++) {
+			for (int bit = 7; bit >= 0; bit--) {
+				symbols[idx++] = ((grb[byte] >> bit) & 0x1) ? bit1 : bit0;
+			}
+		}
+	}
+
+	symbols[idx] = (rmt_symbol_word_t){
+		.level0 = 0, .duration0 = 600,
+		.level1 = 0, .duration1 = 600,
+	};
+
+	if (rmt_transmit(led_rmt_chan, led_rmt_encoder, symbols, sizeof(symbols), &tx_cfg) == ESP_OK) {
+		rmt_tx_wait_all_done(led_rmt_chan, portMAX_DELAY);
+	}
+}
+
+static int led_index_from_slot(int slot)
+{
+	if (slot < 0 || slot >= LED_COUNT) {
+		return -1;
+	}
+
+	return slot;
+}
+
+static void led_set_all(uint8_t r, uint8_t g, uint8_t b)
+{
+	for (int i = 0; i < LED_COUNT; i++) {
+		led_pixels[i].r = r;
+		led_pixels[i].g = g;
+		led_pixels[i].b = b;
+	}
+	led_ws2812_show();
+}
+
+static void led_apply_base_state(bool edit_active, int edit_slot)
+{
+	if (edit_active) {
+		int led_idx = led_index_from_slot(edit_slot);
+		led_set_all(0, 0, 0);
+		if (led_idx >= 0) {
+			led_pixels[led_idx].r = LED_EDIT_R;
+			led_pixels[led_idx].g = LED_EDIT_G;
+			led_pixels[led_idx].b = LED_EDIT_B;
+			led_ws2812_show();
+		}
+	} else {
+		led_set_all(0, 0, 0);
+	}
+}
+
+static void led_flash_sequence(uint8_t r, uint8_t g, uint8_t b, int flashes)
+{
+	for (int i = 0; i < flashes; i++) {
+		led_set_all(r, g, b);
+		vTaskDelay(pdMS_TO_TICKS(LED_FLASH_ON_MS));
+		led_set_all(0, 0, 0);
+		vTaskDelay(pdMS_TO_TICKS(LED_FLASH_OFF_MS));
+	}
+}
+
+static void led_enqueue_event(led_event_t event, int slot)
+{
+	led_event_msg_t msg;
+
+	if (led_event_queue == NULL) {
+		return;
+	}
+
+	msg.event = event;
+	msg.slot = slot;
+
+	if (xQueueSend(led_event_queue, &msg, 0) != pdTRUE) {
+		ESP_LOGW(TAG, "LED event queue full, dropping event=%d", (int)event);
+	}
+}
+
+static void led_task(void *arg)
+{
+	led_event_msg_t msg;
+	(void)arg;
+	bool edit_active = false;
+	int edit_slot = -1;
+
+	led_apply_base_state(false, edit_slot);
+
+	while (1) {
+		if (xQueueReceive(led_event_queue, &msg, portMAX_DELAY) != pdTRUE) {
+			continue;
+		}
+
+		if (msg.event == LED_EVENT_SUCCESS) {
+			led_flash_sequence(0, 255, 0, 3);
+		} else if (msg.event == LED_EVENT_FAILURE) {
+			led_flash_sequence(255, 0, 0, 3);
+		} else if (msg.event == LED_EVENT_EDIT_BEGIN) {
+			edit_active = true;
+			edit_slot = msg.slot;
+		} else if (msg.event == LED_EVENT_EDIT_END) {
+			edit_active = false;
+			edit_slot = -1;
+		}
+
+		led_apply_base_state(edit_active, edit_slot);
+	}
+}
+
+static void start_led_feedback(void)
+{
+	rmt_tx_channel_config_t rmt_chan_cfg;
+	rmt_copy_encoder_config_t copy_cfg = {};
+
+	led_event_queue = xQueueCreate(8, sizeof(led_event_msg_t));
+	if (led_event_queue == NULL) {
+		ESP_LOGE(TAG, "Failed to create LED event queue");
+		return;
+	}
+
+	rmt_chan_cfg = (rmt_tx_channel_config_t){
+		.gpio_num = LED_WS2812_GPIO,
+		.clk_src = RMT_CLK_SRC_DEFAULT,
+		.resolution_hz = 10 * 1000 * 1000,
+		.mem_block_symbols = 64,
+		.trans_queue_depth = 4,
+	};
+	if (rmt_new_tx_channel(&rmt_chan_cfg, &led_rmt_chan) != ESP_OK) {
+		ESP_LOGE(TAG, "Failed to create RMT channel for LEDs");
+		return;
+	}
+
+	if (rmt_new_copy_encoder(&copy_cfg, &led_rmt_encoder) != ESP_OK) {
+		ESP_LOGE(TAG, "Failed to create RMT encoder for LEDs");
+		return;
+	}
+
+	if (rmt_enable(led_rmt_chan) != ESP_OK) {
+		ESP_LOGE(TAG, "Failed to enable RMT LED channel");
+		return;
+	}
+
+	xTaskCreatePinnedToCore(led_task, "led_task", 3072, NULL, 3, NULL, 1);
+	ESP_LOGI(TAG, "LED feedback ready on WS2812 GPIO=%d with %d LEDs",
+		 (int)LED_WS2812_GPIO, LED_COUNT);
+}
 
 /* ── Button event + UI state types ────────────────────────────────────────── */
 typedef enum { BTN_EVT_UP, BTN_EVT_DOWN, BTN_EVT_SELECT, BTN_EVT_BACK } btn_event_t;
@@ -323,10 +713,206 @@ static void lcd_draw_string(uint16_t x, uint16_t y, const char *str, uint16_t co
 	}
 }
 
+/* Forward declaration needed by schedule helpers in this section. */
+static void bridge_copy_string(char *dest, size_t dest_size, const char *src);
+
+static bool screen_parse_hhmm(const char *token, int *minutes_out)
+{
+	char local[24];
+	char *p;
+	char *end;
+	char *endptr;
+	long hour;
+	long minute;
+	bool has_am = false;
+	bool has_pm = false;
+
+	if (token == NULL || minutes_out == NULL) {
+		return false;
+	}
+
+	bridge_copy_string(local, sizeof(local), token);
+	p = local;
+	while (*p == ' ' || *p == '\t') {
+		p++;
+	}
+
+	end = p + strlen(p);
+	while (end > p && (end[-1] == ' ' || end[-1] == '\t')) {
+		end--;
+	}
+	*end = '\0';
+
+	if (*p == '\0') {
+		return false;
+	}
+
+	for (char *it = p; *it != '\0'; it++) {
+		if (*it >= 'A' && *it <= 'Z') {
+			*it = (char)(*it - 'A' + 'a');
+		}
+		if (*it == '.') {
+			*it = ':';
+		}
+	}
+
+	end = p + strlen(p);
+	if (end - p >= 2 && end[-2] == 'a' && end[-1] == 'm') {
+		has_am = true;
+		end -= 2;
+	} else if (end - p >= 2 && end[-2] == 'p' && end[-1] == 'm') {
+		has_pm = true;
+		end -= 2;
+	}
+	while (end > p && (end[-1] == ' ' || end[-1] == '\t')) {
+		end--;
+	}
+	*end = '\0';
+
+	if (*p == '\0') {
+		return false;
+	}
+
+	hour = strtol(p, &endptr, 10);
+	if (endptr == p) {
+		return false;
+	}
+
+	/* Accept hour-only format like "11" as 11:00. */
+	if (*endptr == '\0') {
+		minute = 0;
+	} else if (*endptr != ':') {
+		return false;
+	} else {
+		char *minute_start = endptr + 1;
+		minute = strtol(minute_start, &endptr, 10);
+		if (endptr == minute_start) {
+			return false;
+		}
+		if (*endptr != '\0') {
+			return false;
+		}
+	}
+
+	if (minute < 0 || minute > 59) {
+		return false;
+	}
+
+	if (has_am || has_pm) {
+		if (hour < 1 || hour > 12) {
+			return false;
+		}
+		if (has_am && hour == 12) {
+			hour = 0;
+		} else if (has_pm && hour != 12) {
+			hour += 12;
+		}
+	} else if (hour < 0 || hour > 23) {
+		return false;
+	}
+
+	*minutes_out = (int)(hour * 60 + minute);
+	return true;
+}
+
+static void screen_get_next_dispense_string(const pico_bridge_state_t *snapshot, char *out, size_t out_len)
+{
+	time_t now;
+	struct tm ti;
+	int current_minutes;
+	int best_delta = (24 * 60) + 1;
+	int best_minutes = -1;
+	int best_slots[PILL_SLOT_COUNT];
+	int best_count = 0;
+
+	if (out == NULL || out_len == 0) {
+		return;
+	}
+
+	out[0] = '\0';
+	now = time(NULL);
+	if (now <= 1700000000 || localtime_r(&now, &ti) == NULL) {
+		snprintf(out, out_len, "SYNC TIME");
+		return;
+	}
+
+	current_minutes = (ti.tm_hour * 60) + ti.tm_min;
+	for (int si = 0; si < PILL_SLOT_COUNT; si++) {
+		const pill_slot_state_t *slot = &snapshot->slots[si];
+		char schedule_copy[40];
+		char *saveptr = NULL;
+		char *token;
+
+		if (slot->schedule[0] == '\0' || strcmp(slot->schedule, "none") == 0) {
+			continue;
+		}
+
+		bridge_copy_string(schedule_copy, sizeof(schedule_copy), slot->schedule);
+		token = strtok_r(schedule_copy, ",", &saveptr);
+		while (token != NULL) {
+			int event_minutes;
+
+			if (screen_parse_hhmm(token, &event_minutes)) {
+				int delta = event_minutes - current_minutes;
+				if (delta < 0) {
+					delta += (24 * 60);
+				}
+				if (delta < best_delta) {
+					best_delta = delta;
+					best_minutes = event_minutes;
+					best_count = 1;
+					best_slots[0] = si;
+				} else if (delta == best_delta && best_count < PILL_SLOT_COUNT) {
+					bool already_present = false;
+					for (int bi = 0; bi < best_count; bi++) {
+						if (best_slots[bi] == si) {
+							already_present = true;
+							break;
+						}
+					}
+					if (!already_present) {
+						best_slots[best_count++] = si;
+					}
+				}
+			}
+
+			token = strtok_r(NULL, ",", &saveptr);
+		}
+	}
+
+	if (best_minutes < 0) {
+		snprintf(out, out_len, "NO SCHEDULE");
+	} else {
+		char slots_buf[24] = {0};
+		size_t used = 0;
+
+		for (int i = 0; i < best_count; i++) {
+			int written = snprintf(slots_buf + used,
+					       sizeof(slots_buf) - used,
+					       "%sS%d",
+					       i == 0 ? "" : (best_count == 2 ? "&" : ","),
+					       best_slots[i]);
+			if (written < 0 || (size_t)written >= (sizeof(slots_buf) - used)) {
+				break;
+			}
+			used += (size_t)written;
+		}
+
+		snprintf(out,
+			 out_len,
+			 "%02d:%02d FOR %s",
+			 best_minutes / 60,
+			 best_minutes % 60,
+			 slots_buf);
+	}
+	return;
+}
+
 /* Renders the live pill slot data onto the LCD. Called from screen_task. */
 static void screen_draw_ui(const pico_bridge_state_t *snapshot)
 {
 	char buf[32];
+	char next_dispense[24];
 	int slot_index;
 	int si;
 	time_t now;
@@ -340,7 +926,7 @@ static void screen_draw_ui(const pico_bridge_state_t *snapshot)
 	/* Scan slots for alert conditions before drawing */
 	alert_fail = false;
 	alert_low  = false;
-	for (si = 0; si < PILL_SLOT_COUNT; si++) {
+	for (si = 0; si < UI_VISIBLE_SLOT_COUNT; si++) {
 		const pill_slot_state_t *s = &snapshot->slots[si];
 		if (!s->is_active) continue;
 		if (strcmp(s->last_dispense_result, "fail") == 0 ||
@@ -382,29 +968,29 @@ static void screen_draw_ui(const pico_bridge_state_t *snapshot)
 
 	/* ── Column headers ──────────────────────────────────────────── */
 	lcd_fill_rect(0, 46, SCREEN_W, 26, LCD_DKGREY);
-	lcd_draw_string(8,   52, "SLOT",   LCD_GREY, LCD_DKGREY, 2);
-	lcd_draw_string(57,  52, "MED",    LCD_GREY, LCD_DKGREY, 2);
-	lcd_draw_string(253, 52, "LEFT",   LCD_GREY, LCD_DKGREY, 2);
-	lcd_draw_string(317, 52, "DOSE",   LCD_GREY, LCD_DKGREY, 2);
-	lcd_draw_string(375, 52, "STATUS", LCD_GREY, LCD_DKGREY, 2);
-	lcd_draw_hline(0, 72, SCREEN_W, LCD_GREY);
+	lcd_draw_string(8,   52, "SLOT",   LCD_CYAN, LCD_DKGREY, 2);
+	lcd_draw_string(76,  52, "MED",    LCD_WHITE,  LCD_DKGREY, 2);
+	lcd_draw_string(253, 52, "LEFT",   LCD_CYAN, LCD_DKGREY, 2);
+	lcd_draw_string(317, 52, "DOSE",   LCD_WHITE,  LCD_DKGREY, 2);
+	lcd_draw_string(375, 52, "STATUS", LCD_CYAN, LCD_DKGREY, 2);
+	lcd_draw_hline(0, 72, SCREEN_W, LCD_WHITE);
 
-	/* ── One row per slot (5 rows × 48 px) ──────────────────────── */
-	for (slot_index = 0; slot_index < PILL_SLOT_COUNT; slot_index++) {
+	/* ── One row per visible slot (0..2) ─────────────────────────── */
+	for (slot_index = 0; slot_index < UI_VISIBLE_SLOT_COUNT; slot_index++) {
 		const pill_slot_state_t *slot = &snapshot->slots[slot_index];
-		uint16_t row_y      = (uint16_t)(74 + slot_index * 48);
-		uint16_t slot_col   = (snapshot->active_profile_slot == slot_index) ? LCD_CYAN : LCD_GREY;
+		uint16_t row_y      = (uint16_t)(74 + slot_index * 62);
+		uint16_t slot_col   = LCD_CYAN;
 		const char *status_str;
 		uint16_t status_color;
 		int i;
 
-		lcd_fill_rect(0, row_y, SCREEN_W, 46, LCD_BLACK);
+		lcd_fill_rect(0, row_y, SCREEN_W, 60, LCD_BLACK);
 
 		/* Slot label: S0 .. S4 */
 		buf[0] = 'S';
 		buf[1] = (char)('0' + slot_index);
 		buf[2] = '\0';
-		lcd_draw_string(8, (uint16_t)(row_y + 16), buf, slot_col, LCD_BLACK, 2);
+		lcd_draw_string(8, (uint16_t)(row_y + 20), buf, slot_col, LCD_BLACK, 2);
 
 		/* Medication name — uppercase, capped at 16 chars */
 		if (slot->has_data) {
@@ -416,9 +1002,9 @@ static void screen_draw_ui(const pico_bridge_state_t *snapshot)
 					med[i] = (char)(med[i] - 32);
 				}
 			}
-			lcd_draw_string(57, (uint16_t)(row_y + 16), med, LCD_WHITE, LCD_BLACK, 2);
+			lcd_draw_string(76, (uint16_t)(row_y + 20), med, LCD_WHITE, LCD_BLACK, 2);
 		} else {
-			lcd_draw_string(57, (uint16_t)(row_y + 16), "NO DATA", LCD_GREY, LCD_BLACK, 2);
+			lcd_draw_string(76, (uint16_t)(row_y + 20), "NO DATA", LCD_GREY, LCD_BLACK, 2);
 		}
 
 		/* Pills left — color-coded: red at 0, yellow near empty */
@@ -434,7 +1020,7 @@ static void screen_draw_ui(const pico_bridge_state_t *snapshot)
 			} else {
 				snprintf(buf, sizeof(buf), "--");
 			}
-			lcd_draw_string(253, (uint16_t)(row_y + 16), buf, pill_color, LCD_BLACK, 2);
+			lcd_draw_string(253, (uint16_t)(row_y + 20), buf, pill_color, LCD_BLACK, 2);
 		}
 
 		/* Pills per dose */
@@ -443,7 +1029,7 @@ static void screen_draw_ui(const pico_bridge_state_t *snapshot)
 		} else {
 			snprintf(buf, sizeof(buf), "--");
 		}
-		lcd_draw_string(317, (uint16_t)(row_y + 16), buf, LCD_WHITE, LCD_BLACK, 2);
+		lcd_draw_string(317, (uint16_t)(row_y + 20), buf, LCD_WHITE, LCD_BLACK, 2);
 
 		/* Dispense status */
 		if (!slot->is_active) {
@@ -463,10 +1049,17 @@ static void screen_draw_ui(const pico_bridge_state_t *snapshot)
 			status_str   = "WAITING";
 			status_color = LCD_YELLOW;
 		}
-		lcd_draw_string(375, (uint16_t)(row_y + 16), status_str, status_color, LCD_BLACK, 2);
+		lcd_draw_string(375, (uint16_t)(row_y + 20), status_str, status_color, LCD_BLACK, 2);
 
-		lcd_draw_hline(0, (uint16_t)(row_y + 46), SCREEN_W, LCD_DKGREY);
+		lcd_draw_hline(0, (uint16_t)(row_y + 60), SCREEN_W, LCD_DKGREY);
 	}
+
+	/* Next dispense banner uses free space from reducing rows to 0..2. */
+	screen_get_next_dispense_string(snapshot, next_dispense, sizeof(next_dispense));
+	lcd_fill_rect(0, 262, SCREEN_W, 58, LCD_DKGREY);
+	lcd_draw_hline(0, 262, SCREEN_W, LCD_WHITE);
+	lcd_draw_string(8, 278, "NEXT DISPENSE AT", LCD_CYAN, LCD_DKGREY, 2);
+	lcd_draw_string(210, 278, next_dispense, LCD_WHITE, LCD_DKGREY, 2);
 }
 
 /* Forward declarations for bridge helpers used before their definitions */
@@ -633,6 +1226,7 @@ static void button_task(void *arg)
 static void screen_task(void *arg)
 {
 	pico_bridge_state_t *snapshot;
+	TickType_t last_input_tick;
 
 	(void)arg;
 
@@ -645,6 +1239,7 @@ static void screen_task(void *arg)
 
 	ui_state.screen = UI_STATUS;
 	ui_state.cursor = 0;
+	last_input_tick = xTaskGetTickCount();
 	lcd_fill_rect(0, 0, SCREEN_W, SCREEN_H, LCD_BLACK);
 
 	while (1) {
@@ -655,6 +1250,7 @@ static void screen_task(void *arg)
 		bool got_event = xQueueReceive(btn_queue, &evt, wait) == pdTRUE;
 
 		if (got_event) {
+			last_input_tick = xTaskGetTickCount();
 			switch (ui_state.screen) {
 			case UI_STATUS:
 				ui_state.screen = UI_SLOT_MENU;
@@ -718,6 +1314,8 @@ static void screen_task(void *arg)
 						}
 						ui_state.cursor = 0;
 						ui_state.screen = UI_EDIT_FIELD;
+						audio_enqueue_event(AUDIO_EVENT_EDIT_BEGIN);
+						led_enqueue_event(LED_EVENT_EDIT_BEGIN, ui_state.edit_slot);
 					} else {
 						/* Back */
 						ui_state.screen = UI_SLOT_MENU;
@@ -728,6 +1326,7 @@ static void screen_task(void *arg)
 
 			case UI_EDIT_FIELD:
 				if (evt == BTN_EVT_BACK) {
+					led_enqueue_event(LED_EVENT_EDIT_END, ui_state.edit_slot);
 					ui_state.screen = UI_ACTION_MENU;
 					ui_state.cursor = 1;
 					break;
@@ -757,6 +1356,7 @@ static void screen_task(void *arg)
 							bridge_send_load_profile_for_slot(s);
 							xSemaphoreGive(bridge_state_mutex);
 						}
+						led_enqueue_event(LED_EVENT_EDIT_END, ui_state.edit_slot);
 						ui_state.screen = UI_STATUS;
 					}
 					break;
@@ -788,7 +1388,15 @@ static void screen_task(void *arg)
 
 		/* Redraw: always on button event; also on 2s timeout in status mode */
 		if (!got_event && ui_state.screen != UI_STATUS) {
-			continue;
+			if ((xTaskGetTickCount() - last_input_tick) >= pdMS_TO_TICKS(UI_INACTIVITY_TIMEOUT_MS)) {
+				if (ui_state.screen == UI_EDIT_FIELD) {
+					led_enqueue_event(LED_EVENT_EDIT_END, ui_state.edit_slot);
+				}
+				ui_state.screen = UI_STATUS;
+				ui_state.cursor = 0;
+			} else {
+				continue;
+			}
 		}
 
 		memset(snapshot, 0, sizeof(*snapshot));
@@ -876,6 +1484,7 @@ static void bridge_state_reset_defaults(pico_bridge_state_t *state)
 	strcpy(state->slots[0].last_event, "ESP dashboard ready. Waiting for Pico 2 data link.");
 	strcpy(state->slots[0].notes, "Expect TIME_REQ, BOOT_SYNC, STATUS, and ACK from Pico over UART.");
 	state->history_count = 0;
+	state->dispense_queue_count = 0;
 	strcpy(state->last_ack_action, "none");
 	strcpy(state->last_ack_result, "none");
 	state->awaiting_dispense_ack = false;
@@ -946,7 +1555,14 @@ static bool bridge_state_load_from_nvs(pico_bridge_state_t *state)
 {
 	nvs_handle_t handle;
 	size_t size = sizeof(*state);
+	size_t min_legacy_size = offsetof(pico_bridge_state_t, dispense_queue);
 	esp_err_t err = nvs_open(BRIDGE_NVS_NAMESPACE, NVS_READWRITE, &handle);
+
+	if (state == NULL) {
+		return false;
+	}
+
+	memset(state, 0, sizeof(*state));
 
 	if (err != ESP_OK) {
 		ESP_LOGW(TAG, "Failed to open NVS namespace: %s", esp_err_to_name(err));
@@ -955,9 +1571,16 @@ static bool bridge_state_load_from_nvs(pico_bridge_state_t *state)
 
 	err = nvs_get_blob(handle, "state", state, &size);
 	nvs_close(handle);
-	if (err != ESP_OK || size != sizeof(*state)) {
+	if (err != ESP_OK) {
 		return false;
 	}
+
+	/* Accept legacy blobs that predate dispense queue fields. */
+	if (size < min_legacy_size || size > sizeof(*state)) {
+		return false;
+	}
+
+	state->dispense_queue_count = 0;
 
 	return true;
 }
@@ -1053,6 +1676,63 @@ static void bridge_send_dispense_for_slot(int slot_number)
 	}
 
 	uart_bridge_send_line(line);
+}
+
+static void bridge_start_dispense_locked(pico_bridge_state_t *state, int slot_number)
+{
+	if (state == NULL || bridge_slot_index_from_number(slot_number) < 0) {
+		return;
+	}
+
+	bridge_send_dispense_for_slot(slot_number);
+	state->active_profile_slot = slot_number;
+	state->awaiting_dispense_ack = true;
+	state->dispense_ack_deadline_us = esp_timer_get_time() + DISPENSE_ACK_TIMEOUT_US;
+	bridge_copy_string(state->last_ack_action, sizeof(state->last_ack_action), "DISPENSE");
+	bridge_copy_string(state->last_ack_result, sizeof(state->last_ack_result), "pending");
+}
+
+static bool bridge_enqueue_dispense_slot_locked(pico_bridge_state_t *state, int slot_number)
+{
+	if (state == NULL || bridge_slot_index_from_number(slot_number) < 0) {
+		return false;
+	}
+
+	if (state->awaiting_dispense_ack && state->active_profile_slot == slot_number) {
+		return true;
+	}
+
+	for (int i = 0; i < state->dispense_queue_count; i++) {
+		if (state->dispense_queue[i] == slot_number) {
+			return true;
+		}
+	}
+
+	if (state->dispense_queue_count >= PILL_SLOT_COUNT) {
+		return false;
+	}
+
+	state->dispense_queue[state->dispense_queue_count++] = slot_number;
+	return true;
+}
+
+static bool bridge_start_next_dispense_locked(pico_bridge_state_t *state)
+{
+	int next_slot;
+
+	if (state == NULL || state->awaiting_dispense_ack || state->dispense_queue_count <= 0) {
+		return false;
+	}
+
+	next_slot = state->dispense_queue[0];
+	if (state->dispense_queue_count > 1) {
+		memmove(&state->dispense_queue[0],
+			&state->dispense_queue[1],
+			(size_t)(state->dispense_queue_count - 1) * sizeof(state->dispense_queue[0]));
+	}
+	state->dispense_queue_count--;
+	bridge_start_dispense_locked(state, next_slot);
+	return true;
 }
 
 static void bridge_send_load_profile_for_slot(const pill_slot_state_t *slot_state)
@@ -1151,6 +1831,14 @@ static void bridge_handle_ack_line(pico_bridge_state_t *state, const char *line)
 	if (strcmp(action, "DISPENSE") == 0) {
 		state->awaiting_dispense_ack = false;
 		state->dispense_ack_deadline_us = 0;
+		if (strcmp(result, "ok") == 0) {
+			audio_enqueue_event(AUDIO_EVENT_SUCCESS);
+			led_enqueue_event(LED_EVENT_SUCCESS, ack_slot);
+		} else if (strcmp(result, "fail") == 0 || strcmp(result, "timeout") == 0) {
+			audio_enqueue_event(AUDIO_EVENT_FAILURE);
+			led_enqueue_event(LED_EVENT_FAILURE, ack_slot);
+		}
+		bridge_start_next_dispense_locked(state);
 	}
 	if (ack_slot >= 0 && ack_slot < PILL_SLOT_COUNT) {
 		state->active_profile_slot = ack_slot;
@@ -1264,6 +1952,9 @@ static void bridge_update_connected_flag_locked(void)
 				   sizeof(timed_out_slot->last_event),
 				   "Dispense timed out - no ACK from Pico.");
 		bridge_log_status_locked(&bridge_state, timed_out_slot);
+		audio_enqueue_event(AUDIO_EVENT_FAILURE);
+		led_enqueue_event(LED_EVENT_FAILURE, bridge_state.active_profile_slot);
+		bridge_start_next_dispense_locked(&bridge_state);
 	}
 
 	bridge_state.connected = bridge_state.last_update_us > 0 && age_us < UART_BRIDGE_TIMEOUT_US;
@@ -1674,7 +2365,37 @@ static esp_err_t read_http_body(httpd_req_t *req, char *buffer, size_t buffer_si
 
 static bool http_body_get_string(const char *body, const char *key, char *value, size_t value_size)
 {
+	char *src;
+	char *dst;
+
 	if (httpd_query_key_value(body, key, value, value_size) == ESP_OK) {
+		/* Decode application/x-www-form-urlencoded values in-place. */
+		src = value;
+		dst = value;
+		while (*src != '\0') {
+			if (*src == '+') {
+				*dst++ = ' ';
+				src++;
+			} else if (src[0] == '%' && src[1] != '\0' && src[2] != '\0') {
+				char hi = src[1];
+				char lo = src[2];
+				int hi_val = (hi >= '0' && hi <= '9') ? (hi - '0') :
+					     (hi >= 'A' && hi <= 'F') ? (hi - 'A' + 10) :
+					     (hi >= 'a' && hi <= 'f') ? (hi - 'a' + 10) : -1;
+				int lo_val = (lo >= '0' && lo <= '9') ? (lo - '0') :
+					     (lo >= 'A' && lo <= 'F') ? (lo - 'A' + 10) :
+					     (lo >= 'a' && lo <= 'f') ? (lo - 'a' + 10) : -1;
+				if (hi_val >= 0 && lo_val >= 0) {
+					*dst++ = (char)((hi_val << 4) | lo_val);
+					src += 3;
+				} else {
+					*dst++ = *src++;
+				}
+			} else {
+				*dst++ = *src++;
+			}
+		}
+		*dst = '\0';
 		return true;
 	}
 
@@ -1771,11 +2492,19 @@ static esp_err_t profile_post_handler(httpd_req_t *req)
 static esp_err_t dispense_post_handler(httpd_req_t *req)
 {
 	char body[HTTP_BODY_BUFFER_SIZE];
+	char slots_csv[64];
+	bool has_slots_csv;
+	char slots_copy[64];
+	char *saveptr = NULL;
+	char *token;
 	int slot_number;
+	int enqueued_count = 0;
 
 	if (read_http_body(req, body, sizeof(body)) != ESP_OK) {
 		return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
 	}
+
+	has_slots_csv = http_body_get_string(body, "slots", slots_csv, sizeof(slots_csv)) && slots_csv[0] != '\0';
 
 	if (!http_body_get_int(body, "slot", &slot_number)) {
 		slot_number = -1;
@@ -1786,28 +2515,36 @@ static esp_err_t dispense_post_handler(httpd_req_t *req)
 	}
 
 	bridge_update_connected_flag_locked();
-	if (bridge_state.awaiting_dispense_ack) {
-		xSemaphoreGive(bridge_state_mutex);
-		return send_json_response(req, "409 Conflict", "{\"ok\":false,\"error\":\"dispense_pending\"}");
+	if (has_slots_csv) {
+		bridge_copy_string(slots_copy, sizeof(slots_copy), slots_csv);
+		token = strtok_r(slots_copy, ",", &saveptr);
+		while (token != NULL) {
+			int requested_slot = atoi(token);
+			if (bridge_slot_index_from_number(requested_slot) < 0 ||
+			    !bridge_enqueue_dispense_slot_locked(&bridge_state, requested_slot)) {
+				xSemaphoreGive(bridge_state_mutex);
+				return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or full dispense queue");
+			}
+			enqueued_count++;
+			token = strtok_r(NULL, ",", &saveptr);
+		}
+		if (enqueued_count == 0) {
+			xSemaphoreGive(bridge_state_mutex);
+			return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "No valid slots in slots list");
+		}
+	} else {
+		if (slot_number < 0) {
+			slot_number = bridge_state.active_profile_slot;
+		}
+
+		if (bridge_slot_index_from_number(slot_number) < 0 ||
+		    !bridge_enqueue_dispense_slot_locked(&bridge_state, slot_number)) {
+			xSemaphoreGive(bridge_state_mutex);
+			return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid slot number or full queue");
+		}
 	}
 
-	if (slot_number < 0) {
-		slot_number = bridge_state.active_profile_slot;
-	}
-
-	if (bridge_slot_index_from_number(slot_number) < 0) {
-		xSemaphoreGive(bridge_state_mutex);
-		return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid slot number");
-	}
-
-	/* Update the active slot immediately so the UI reflects the intended target
-	 * even if the Pico is not connected and the dispense times out. */
-	bridge_state.active_profile_slot = slot_number;
-	bridge_send_dispense_for_slot(slot_number);
-	bridge_state.awaiting_dispense_ack = true;
-	bridge_state.dispense_ack_deadline_us = esp_timer_get_time() + DISPENSE_ACK_TIMEOUT_US;
-	bridge_copy_string(bridge_state.last_ack_action, sizeof(bridge_state.last_ack_action), "DISPENSE");
-	bridge_copy_string(bridge_state.last_ack_result, sizeof(bridge_state.last_ack_result), "pending");
+	bridge_start_next_dispense_locked(&bridge_state);
 	bridge_state_save_to_nvs(&bridge_state);
 	xSemaphoreGive(bridge_state_mutex);
 
@@ -1835,6 +2572,62 @@ static esp_err_t time_sync_post_handler(httpd_req_t *req)
 
 	if (!bridge_send_set_time()) {
 		return send_json_response(req, "409 Conflict", "{\"ok\":false,\"error\":\"time_invalid\"}");
+	}
+
+	return send_json_response(req, "200 OK", "{\"ok\":true}");
+}
+
+static esp_err_t feedback_test_post_handler(httpd_req_t *req)
+{
+	char body[HTTP_BODY_BUFFER_SIZE];
+	char result[16];
+
+	if (read_http_body(req, body, sizeof(body)) != ESP_OK) {
+		return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
+	}
+
+	if (!http_body_get_string(body, "result", result, sizeof(result))) {
+		return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing result field");
+	}
+
+	if (strcmp(result, "success") == 0) {
+		audio_enqueue_event(AUDIO_EVENT_SUCCESS);
+		led_enqueue_event(LED_EVENT_SUCCESS, -1);
+	} else if (strcmp(result, "fail") == 0 || strcmp(result, "failure") == 0) {
+		audio_enqueue_event(AUDIO_EVENT_FAILURE);
+		led_enqueue_event(LED_EVENT_FAILURE, -1);
+	} else {
+		return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid result value");
+	}
+
+	return send_json_response(req, "200 OK", "{\"ok\":true}");
+}
+
+static esp_err_t edit_mode_post_handler(httpd_req_t *req)
+{
+	char body[HTTP_BODY_BUFFER_SIZE];
+	char state[16];
+	int slot_number;
+
+	if (read_http_body(req, body, sizeof(body)) != ESP_OK) {
+		return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid request body");
+	}
+
+	if (!http_body_get_int(body, "slot", &slot_number) ||
+	    bridge_slot_index_from_number(slot_number) < 0) {
+		return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid slot");
+	}
+
+	if (!http_body_get_string(body, "state", state, sizeof(state))) {
+		return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing state field");
+	}
+
+	if (strcmp(state, "on") == 0 || strcmp(state, "start") == 0) {
+		led_enqueue_event(LED_EVENT_EDIT_BEGIN, slot_number);
+	} else if (strcmp(state, "off") == 0 || strcmp(state, "end") == 0) {
+		led_enqueue_event(LED_EVENT_EDIT_END, slot_number);
+	} else {
+		return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid state value");
 	}
 
 	return send_json_response(req, "200 OK", "{\"ok\":true}");
@@ -1993,7 +2786,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 	const char *response =
 		"<!doctype html><html><head><meta charset=\"utf-8\">"
 		"<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-		"<title>Pill Dispenser Control Surface</title>"
+		"<title>Pill Dispenser Home</title>"
 		"<style>"
 		":root{color-scheme:light;--bg:#f4efe7;--ink:#112027;--muted:#5d6b70;--panel:#fffaf3;--line:rgba(17,32,39,.1);--shadow:0 22px 60px rgba(17,32,39,.14);--teal:#0f766e;--teal-soft:#d8f1ee;--amber:#c77b18;--amber-soft:#fff0d8;}"
 		"*{box-sizing:border-box;}"
@@ -2038,6 +2831,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		".result-fail{color:#b91c1c;}"
 		".footer{display:flex;flex-wrap:wrap;gap:10px;margin-top:18px;color:var(--muted);font-size:.92rem;}"
 		".controls{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;}"
+		".edit-panel{display:none;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin-top:10px;}"
 		"label{display:grid;gap:6px;font-size:.9rem;color:var(--muted);}"
 		"input,select,button{font:inherit;border-radius:14px;border:1px solid var(--line);padding:10px 12px;background:#fffdf9;color:var(--ink);}"
 		"button{cursor:pointer;background:#12333b;color:#f7fbfb;border:none;}"
@@ -2058,25 +2852,25 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"<main class=\"shell\">"
 		"<section class=\"hero\">"
 		"<div class=\"eyebrow\">ESP32 access point dashboard</div>"
-		"<h1>Pill Dispenser Control Surface</h1>"
-		"<p class=\"lede\">A focused view of the pill dispenser. This page only shows the connection to the Raspberry Pi Pico, the current pill profile, the current time, and the last dispense information.</p>"
+		"<h1>Pill Dispenser Home</h1>"
+		"<p class=\"lede\">Use this page to check connection status, review each slot, save medication settings, and run a dispense when needed.</p>"
 		"</section>"
 		"<div class=\"stack\">"
 		"<div id=\"fail-banner\" class=\"alert-banner\">&#9888; Dispense failure detected &mdash; check the dispenser.</div>"
 		"<div id=\"low-pill-banner\" class=\"warn-banner\">&#9888; Low pill count &mdash; one or more slots need refilling soon.</div>"
 		"<section class=\"panel\">"
 		"<div class=\"panel-head\">"
-		"<div><p class=\"panel-title\">Connection State</p><div id=\"bridge-copy\">The ESP page is up. Waiting for live Raspberry Pi Pico data.</div></div>"
-		"<div class=\"status-pill\" id=\"bridge-pill\"><span class=\"dot\"></span><span id=\"bridge-label\">Bridge Pending</span></div>"
+		"<div><p class=\"panel-title\">System Status</p><div id=\"bridge-copy\">Dashboard is running. Waiting for dispenser connection.</div></div>"
+		"<div class=\"status-pill\" id=\"bridge-pill\"><span class=\"dot\"></span><span id=\"bridge-label\">Connecting...</span></div>"
 		"</div>"
 		"<div class=\"connection-grid\">"
-		"<article class=\"summary accent-teal\"><div class=\"label\">Controller</div><div class=\"value\" id=\"controller-name\">Raspberry Pi Pico 2</div><div class=\"hint\">Main MCU expected to provide live pill and dispense state.</div></article>"
-		"<article class=\"summary accent-amber\"><div class=\"label\">Transport</div><div class=\"value\" id=\"controller-transport\">Waiting for UART bridge</div><div class=\"hint\">Shows whether the ESP is receiving Pico-side updates.</div></article>"
+		"<article class=\"summary accent-teal\"><div class=\"label\">Controller</div><div class=\"value\" id=\"controller-name\">Raspberry Pi Pico 2</div><div class=\"hint\">This board controls the motors and confirms dispense events.</div></article>"
+		"<article class=\"summary accent-amber\"><div class=\"label\">Connection</div><div class=\"value\" id=\"controller-transport\">Waiting for dispenser link</div><div class=\"hint\">Shows whether live updates are arriving from the dispenser controller.</div></article>"
 		"<article class=\"summary accent-teal\"><div class=\"label\">Device Time</div><div class=\"value\" id=\"device-time\">Loading...</div><div class=\"hint\">Current time reported by the ESP dashboard host.</div></article>"
 		"</div>"
 		"</section>"
 		"<section class=\"panel\">"
-		"<div class=\"panel-head\"><div><p class=\"panel-title\">Slot Overview</p><div>Five Pico protocol slots are shown below. The selected slot is highlighted and mirrored in the detail panel.</div></div></div>"
+		"<div class=\"panel-head\"><div><p class=\"panel-title\">Medication Slots</p><div>All five slots are shown below. The highlighted card is the currently active slot.</div></div></div>"
 		"<div class=\"grid\">"
 		"<article class=\"metric accent-teal slot-card\" id=\"slot-card-0\"><div class=\"label\">Slot 0</div><div class=\"value\" id=\"slot-medication-0\">Waiting for data</div><div class=\"hint\">Pills left: <span id=\"slot-left-0\">--</span></div><div class=\"hint\">Dose: <span id=\"slot-dose-0\">--</span> | Doses remaining: <span id=\"slot-doses-0\">--</span></div><div class=\"hint\">Schedule: <span id=\"slot-schedule-0\">none</span></div><div class=\"hint\">Result: <span id=\"slot-result-0\">unknown</span></div></article>"
 		"<article class=\"metric accent-amber slot-card\" id=\"slot-card-1\"><div class=\"label\">Slot 1</div><div class=\"value\" id=\"slot-medication-1\">Waiting for data</div><div class=\"hint\">Pills left: <span id=\"slot-left-1\">--</span></div><div class=\"hint\">Dose: <span id=\"slot-dose-1\">--</span> | Doses remaining: <span id=\"slot-doses-1\">--</span></div><div class=\"hint\">Schedule: <span id=\"slot-schedule-1\">none</span></div><div class=\"hint\">Result: <span id=\"slot-result-1\">unknown</span></div></article>"
@@ -2086,7 +2880,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"</div>"
 		"</section>"
 		"<section class=\"panel\">"
-		"<div class=\"panel-head\"><div><p class=\"panel-title\">Active Slot Detail</p><div>Most recent details for the slot identified by the Pico in its STATUS update.</div></div></div>"
+		"<div class=\"panel-head\"><div><p class=\"panel-title\">Selected Slot Details</p><div>Latest medication and dispense details for the active slot.</div></div></div>"
 		"<div class=\"grid\">"
 		"<article class=\"metric accent-teal\"><div class=\"label\">Medication</div><div class=\"value\" id=\"medication-name\">Waiting for data</div><div class=\"hint\">Active profile slot <span id=\"profile-slot\">0</span>.</div></article>"
 		"<article class=\"metric accent-amber\"><div class=\"label\">Pills Left</div><div class=\"value\" id=\"pills-left\">--</div><div class=\"hint\"><span id=\"doses-remaining\">--</span> full doses remaining at <span id=\"pills-per-dose\">--</span> pills per dose.</div></article>"
@@ -2095,26 +2889,31 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"<div class=\"row\"><span class=\"k\">Last Dispense</span><span class=\"v\" id=\"last-dispensed\">No confirmed dispense yet</span></div>"
 		"<div class=\"row\"><span class=\"k\">Last Event</span><span class=\"v\" id=\"last-event\">Waiting for live data</span></div>"
 		"<div class=\"row\"><span class=\"k\">Last Result</span><span class=\"v\" id=\"last-result\">Waiting</span></div>"
-		"<div class=\"row\"><span class=\"k\">Profile Notes</span><span class=\"v\" id=\"dashboard-notes\">Waiting for live pill slot data.</span></div>"
+		"<div class=\"row\"><span class=\"k\">Notes</span><span class=\"v\" id=\"dashboard-notes\">Waiting for live pill slot data.</span></div>"
 		"</div>"
 		"</section>"
 		"<section class=\"panel\">"
-		"<div class=\"panel-head\"><div><p class=\"panel-title\">Controls</p><div>Save profiles to ESP storage, sync them to the Pico, trigger dispense, and manually resend time.</div></div></div>"
+		"<div class=\"panel-head\"><div><p class=\"panel-title\">Actions</p><div>Pick a slot, update its settings, run a dispense, or test lights and sounds.</div></div></div>"
 		"<div class=\"controls\">"
 		"<label>Slot<select id=\"control-slot\"><option value=\"0\">Slot 0</option><option value=\"1\">Slot 1</option><option value=\"2\">Slot 2</option><option value=\"3\">Slot 3</option><option value=\"4\">Slot 4</option></select></label>"
-		"<label>Medication<input id=\"control-med\" maxlength=\"31\" placeholder=\"Aspirin\"></label>"
-		"<label>Total Pills<input id=\"control-total\" type=\"number\" min=\"1\" step=\"1\" value=\"20\"></label>"
-		"<label>Dose<input id=\"control-dose\" type=\"number\" min=\"1\" step=\"1\" value=\"1\"></label>"
-		"<label>Time ms<input id=\"control-time\" type=\"number\" min=\"100\" step=\"50\" value=\"800\"></label>"
-		"<label>Schedule<input id=\"control-schedule\" placeholder=\"08:00,20:00 or none\"></label>"
 		"<label>Manual Time<input id=\"control-manual-time\" type=\"datetime-local\"></label>"
 		"</div>"
-		"<div class=\"control-actions\">"
-		"<button id=\"save-profile\" type=\"button\">Save Profile</button>"
-		"<button id=\"dispense-slot\" type=\"button\">Dispense Selected Slot</button>"
-		"<button id=\"sync-time\" type=\"button\" class=\"alt\">Send Time</button>"
+		"<div class=\"edit-panel\" id=\"edit-panel\">"
+		"<label>Medication Name<input id=\"control-med\" maxlength=\"31\" placeholder=\"Aspirin\"></label>"
+		"<label>Pills in Slot<input id=\"control-total\" type=\"number\" min=\"1\" step=\"1\" value=\"20\"></label>"
+		"<label>Pills per Dose<input id=\"control-dose\" type=\"number\" min=\"1\" step=\"1\" value=\"1\"></label>"
+		"<label>Dispense Time (ms)<input id=\"control-time\" type=\"number\" min=\"100\" step=\"50\" value=\"800\"></label>"
+		"<label>Daily Schedule<input id=\"control-schedule\" placeholder=\"Example: 08:00,20:00 (or none)\"></label>"
 		"</div>"
-		"<div class=\"status-copy\" id=\"control-status\">No command sent yet.</div>"
+		"<div class=\"control-actions\">"
+		"<button id=\"edit-start\" type=\"button\">Edit Slot Settings</button>"
+		"<button id=\"save-profile\" type=\"button\">Save Slot Settings</button>"
+		"<button id=\"dispense-slot\" type=\"button\">Dispense Now</button>"
+		"<button id=\"sync-time\" type=\"button\" class=\"alt\">Sync Clock</button>"
+		"<button id=\"test-success\" type=\"button\" class=\"alt\">Test Success Alert</button>"
+		"<button id=\"test-fail\" type=\"button\" class=\"alt\">Test Failure Alert</button>"
+		"</div>"
+		"<div class=\"status-copy\" id=\"control-status\">Choose an action to begin.</div>"
 		"</section>"
 		"<section class=\"panel\" id=\"history-panel\" style=\"display:none\">"
 		"<div class=\"panel-head\"><div><p class=\"panel-title\">Dispense History</p><div>Most recent dispense events, newest first.</div></div></div>"
@@ -2134,9 +2933,11 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"const control=(id)=>document.getElementById(id);"
 		"const controlIds=['control-slot','control-med','control-total','control-dose','control-time','control-schedule','control-manual-time'];"
 		"let latestSlots=[];"
+		"let webEditActive=false;"
+		"let webEditSlot='0';"
 		"const text=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=value;};"
 		"const toLocalDateTimeValue=date=>{const pad=v=>String(v).padStart(2,'0');return date.getFullYear()+'-'+pad(date.getMonth()+1)+'-'+pad(date.getDate())+'T'+pad(date.getHours())+':'+pad(date.getMinutes());};"
-		"const setResult=(id,value)=>{const el=document.getElementById(id);if(!el)return;const normalized=value||'unknown';el.textContent=normalized==='ok'?'Pass':normalized==='fail'?'Fail':normalized;el.className=(id==='last-result'?'v ':'')+(normalized==='ok'?'result-ok':normalized==='fail'?'result-fail':'');};"
+		"const setResult=(id,value)=>{const el=document.getElementById(id);if(!el)return;const normalized=value||'unknown';el.textContent=normalized==='ok'?'Success':normalized==='fail'?'Missed':normalized==='timeout'?'No Response':normalized;el.className=(id==='last-result'?'v ':'')+(normalized==='ok'?'result-ok':normalized==='fail'||normalized==='timeout'?'result-fail':'');};"
 		"const setActiveSlotCard=slot=>{for(let n=0;n<5;n+=1){const card=document.getElementById('slot-card-'+n);if(card)card.className='metric '+(n%2===0?'accent-teal ':'accent-amber ')+'slot-card'+(n===slot?' active':'');}};"
 		"const setStatusCopy=msg=>text('control-status',msg);"
 		"const setSlotCard=slot=>{if(!slot||slot.slot==null)return;text('slot-medication-'+slot.slot,slot.medication_name||'Waiting for data');text('slot-left-'+slot.slot,displayNumber(slot.pills_left));text('slot-dose-'+slot.slot,displayNumber(slot.pills_per_dose));text('slot-doses-'+slot.slot,displayNumber(slot.doses_remaining));text('slot-schedule-'+slot.slot,slot.schedule||'none');setResult('slot-result-'+slot.slot,slot.last_dispense_result||'unknown');};"
@@ -2144,15 +2945,18 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"const getSlotByNumber=slotNumber=>latestSlots.find(slot=>slot&&slot.slot===slotNumber);"
 		"const fillControlsFromSlot=slot=>{if(!slot)return;control('control-slot').value=String(slot.slot);control('control-med').value=slot.medication_name&&slot.medication_name!=='Waiting for data'?slot.medication_name:'';control('control-total').value=slot.total_pills>0?slot.total_pills:20;control('control-dose').value=slot.pills_per_dose>0?slot.pills_per_dose:1;control('control-time').value=slot.time_ms>0?slot.time_ms:800;control('control-schedule').value=slot.schedule&&slot.schedule!=='none'?slot.schedule:'';};"
 		"const postForm=async(url,data)=>{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(data)});if(!r.ok)throw new Error(await r.text());return r.json();};"
-		"const saveProfile=async()=>{const data={slot:control('control-slot').value,med:control('control-med').value,total:control('control-total').value,dose:control('control-dose').value,time:control('control-time').value,schedule:control('control-schedule').value||'none'};await postForm('/api/profile',data);setStatusCopy('Profile saved and sent to Pico.');await refreshStatus();};"
-		"const dispenseSelected=async()=>{await postForm('/api/dispense',{slot:control('control-slot').value});setStatusCopy('Dispense command sent. Waiting for Pico ACK.');await refreshStatus();};"
-		"const syncTime=async()=>{const raw=control('control-manual-time').value;if(!raw)throw new Error('missing-time');const epoch=Math.floor(new Date(raw).getTime()/1000);if(!Number.isFinite(epoch)||epoch<=0)throw new Error('invalid-time');await postForm('/api/time-sync',{epoch:String(epoch)});setStatusCopy('Chosen time sent to Pico.');};"
-		"const setBridgeState=(connected,status)=>{const pill=document.getElementById('bridge-pill');text('bridge-label',connected?'Connected to Pico':'Bridge Pending');text('bridge-copy',connected?'The ESP is receiving live Raspberry Pi Pico updates.':'The ESP page is up. Waiting for live Raspberry Pi Pico data.');if(pill)pill.className=connected?'status-pill online':'status-pill';if(status){text('controller-transport',status);} };"
+		"const setEditPanel=(open)=>{const panel=document.getElementById('edit-panel');const startBtn=control('edit-start');const saveBtn=control('save-profile');if(panel)panel.style.display=open?'grid':'none';if(startBtn)startBtn.style.display=open?'none':'';if(saveBtn)saveBtn.style.display=open?'':'none';};"
+		"const setWebEditMode=async(on)=>{const slot=control('control-slot').value;await postForm('/api/edit-mode',{slot,state:on?'on':'off'});webEditActive=on;webEditSlot=slot;};"
+		"const saveProfile=async()=>{const data={slot:control('control-slot').value,med:control('control-med').value,total:control('control-total').value,dose:control('control-dose').value,time:control('control-time').value,schedule:control('control-schedule').value||'none'};await postForm('/api/profile',data);setStatusCopy('Slot settings saved.');await refreshStatus();if(webEditActive){await setWebEditMode(false);setEditPanel(false);}};"
+		"const dispenseSelected=async()=>{await postForm('/api/dispense',{slot:control('control-slot').value});setStatusCopy('Dispense started. Waiting for confirmation...');await refreshStatus();};"
+		"const syncTime=async()=>{const raw=control('control-manual-time').value;if(!raw)throw new Error('missing-time');const epoch=Math.floor(new Date(raw).getTime()/1000);if(!Number.isFinite(epoch)||epoch<=0)throw new Error('invalid-time');await postForm('/api/time-sync',{epoch:String(epoch)});setStatusCopy('Clock sync sent.');};"
+		"const testFeedback=async(result)=>{await postForm('/api/test-feedback',{result});setStatusCopy(result==='success'?'Success alert test sent.':'Failure alert test sent.');};"
+		"const setBridgeState=(connected,status)=>{const pill=document.getElementById('bridge-pill');text('bridge-label',connected?'Connected':'Connecting...');text('bridge-copy',connected?'Live updates are coming in from the dispenser controller.':'Dashboard is running. Waiting for dispenser connection.');if(pill)pill.className=connected?'status-pill online':'status-pill';if(status){text('controller-transport',status);} };"
 		"async function refreshStatus(){"
 		"try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw new Error('bad-response');const d=await r.json();"
 		"text('device-time',d.device_time||'Unavailable');"
 		"text('controller-name',d.controller_name||'Raspberry Pi Pico 2');"
-		"text('controller-transport',d.controller_transport||'Waiting for UART bridge');"
+		"text('controller-transport',d.controller_transport||'Waiting for dispenser link');"
 		"text('medication-name',d.medication_name||'No active profile');"
 		"text('profile-slot',d.active_profile_slot!=null?d.active_profile_slot:'-');"
 		"text('pills-left',displayNumber(d.pills_left));"
@@ -2165,20 +2969,24 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"const slots=Array.isArray(d.slots)?d.slots:[];latestSlots=slots;slots.forEach(setSlotCard);"
 		"if(!isEditingControls()){const selected=Number(control('control-slot').value);fillControlsFromSlot(getSlotByNumber(selected) || slots.find(slot=>slot&&slot.slot===Number(d.active_profile_slot)) || slots[0]);}"
 		"setActiveSlotCard(Number(d.active_profile_slot)||0);"
-		"if(d.awaiting_dispense_ack){setStatusCopy('Waiting for ACK: '+(d.last_ack_action||'command')+' / '+(d.last_ack_result||'pending'));}"
+		"if(d.awaiting_dispense_ack){setStatusCopy('Waiting for dispenser confirmation...');}"
 		"setBridgeState(Boolean(d.bridge_connected),d.controller_transport);"
 		"const failBanner=document.getElementById('fail-banner');if(failBanner)failBanner.className='alert-banner'+(d.dispense_fail?' visible':'');"
 		"const lowBanner=document.getElementById('low-pill-banner');if(lowBanner)lowBanner.className='warn-banner'+(d.low_pill_warn?' visible':'');"
 		"const history=Array.isArray(d.history)?d.history:[];"
 		"const histPanel=document.getElementById('history-panel');if(histPanel)histPanel.style.display=history.length>0?'':'none';"
-		"const histBody=document.getElementById('history-body');if(histBody&&history.length>0){histBody.innerHTML=history.map((h,i)=>{const t=h.time>0?new Date(h.time*1000).toLocaleTimeString():'--';const res=h.result==='ok'?'Pass':h.result==='fail'?'Fail':h.result||'--';return '<tr><td>'+(i+1)+'</td><td>'+h.slot+'</td><td>'+(h.medication||'--')+'</td><td>'+res+'</td><td>'+displayNumber(h.pills_left_after)+'</td><td>'+t+'</td></tr>';}).join('');}"
+		"const histBody=document.getElementById('history-body');if(histBody&&history.length>0){histBody.innerHTML=history.map((h,i)=>{const t=h.time>0?new Date(h.time*1000).toLocaleTimeString():'--';const res=h.result==='ok'?'Success':h.result==='fail'?'Missed':h.result==='timeout'?'No Response':h.result||'--';return '<tr><td>'+(i+1)+'</td><td>'+h.slot+'</td><td>'+(h.medication||'--')+'</td><td>'+res+'</td><td>'+displayNumber(h.pills_left_after)+'</td><td>'+t+'</td></tr>';}).join('');}"
 		"}catch(e){text('device-time','Disconnected');text('last-event','ESP status endpoint is unavailable.');setBridgeState(false,'ESP status unavailable');}"
 		"}"
-		"control('save-profile').addEventListener('click',()=>{saveProfile().catch(()=>setStatusCopy('Failed to save profile.'));});"
-		"control('dispense-slot').addEventListener('click',()=>{dispenseSelected().catch(()=>setStatusCopy('Failed to send dispense command.'));});"
-		"control('sync-time').addEventListener('click',()=>{syncTime().catch(()=>setStatusCopy('Pick a valid manual time before sending.'));});"
+		"control('edit-start').addEventListener('click',()=>{fillControlsFromSlot(getSlotByNumber(Number(control('control-slot').value)));setWebEditMode(true).then(()=>{setEditPanel(true);setStatusCopy('Edit mode on for selected slot.');}).catch(()=>setStatusCopy('Could not start edit mode.'));});"
+		"control('save-profile').addEventListener('click',()=>{saveProfile().catch(()=>setStatusCopy('Could not save slot settings.'));});"
+		"control('dispense-slot').addEventListener('click',()=>{dispenseSelected().catch(()=>setStatusCopy('Could not start dispense.'));});"
+		"control('sync-time').addEventListener('click',()=>{syncTime().catch(()=>setStatusCopy('Pick a valid date/time first.'));});"
+		"control('test-success').addEventListener('click',()=>{testFeedback('success').catch(()=>setStatusCopy('Could not run success alert test.'));});"
+		"control('test-fail').addEventListener('click',()=>{testFeedback('fail').catch(()=>setStatusCopy('Could not run failure alert test.'));});"
 		"if(!control('control-manual-time').value){control('control-manual-time').value=toLocalDateTimeValue(new Date());}"
-		"control('control-slot').addEventListener('change',()=>{fillControlsFromSlot(getSlotByNumber(Number(control('control-slot').value)));});"
+		"control('control-slot').addEventListener('change',()=>{fillControlsFromSlot(getSlotByNumber(Number(control('control-slot').value)));if(webEditActive){setWebEditMode(true).catch(()=>{});}});"
+		"setEditPanel(false);"
 		"refreshStatus();setInterval(refreshStatus,1500);"
 		"</script></body></html>";
 
@@ -2190,7 +2998,7 @@ static void start_webserver(void)
 {
 	httpd_config_t config = HTTPD_DEFAULT_CONFIG();
 	httpd_handle_t server = NULL;
-	config.max_uri_handlers = 14;
+	config.max_uri_handlers = 16;
 	config.stack_size = 10240;
 	config.uri_match_fn = httpd_uri_match_wildcard;
 	config.max_open_sockets = 4; // Reserve sockets for DNS + lwIP internals (total lwIP sockets = 10)
@@ -2224,6 +3032,18 @@ static void start_webserver(void)
 			.uri = "/api/time-sync",
 			.method = HTTP_POST,
 			.handler = time_sync_post_handler,
+			.user_ctx = NULL,
+		};
+		httpd_uri_t feedback_test = {
+			.uri = "/api/test-feedback",
+			.method = HTTP_POST,
+			.handler = feedback_test_post_handler,
+			.user_ctx = NULL,
+		};
+		httpd_uri_t edit_mode = {
+			.uri = "/api/edit-mode",
+			.method = HTTP_POST,
+			.handler = edit_mode_post_handler,
 			.user_ctx = NULL,
 		};
 		httpd_uri_t android_204 = {
@@ -2286,6 +3106,8 @@ static void start_webserver(void)
 		httpd_register_uri_handler(server, &profile);
 		httpd_register_uri_handler(server, &dispense);
 		httpd_register_uri_handler(server, &time_sync);
+		httpd_register_uri_handler(server, &feedback_test);
+		httpd_register_uri_handler(server, &edit_mode);
 		httpd_register_uri_handler(server, &android_204);
 		httpd_register_uri_handler(server, &android_gen_204);
 		httpd_register_uri_handler(server, &apple_hotspot);
@@ -2348,6 +3170,8 @@ void app_main(void)
 	}
 	ESP_ERROR_CHECK(ret);
 
+	start_audio_feedback();
+	start_led_feedback();
 	start_lcd_display();
 	start_uart_bridge();
 	start_wifi_ap();

@@ -7,11 +7,15 @@
 #include "hardware/irq.h"
 #include <stdio.h>
 
-// === PIEZO SENSOR STATE ===
-static volatile bool piezo_enabled = false;
-static volatile uint32_t piezo_count = 0;
-static volatile uint32_t piezo_last_trigger = 0;
-static piezo_callback_t piezo_callback = NULL;
+// Per-slot pin lookup arrays
+static const uint piezo_slot_pins[SENSOR_SLOT_COUNT] = {PIEZO_PIN_SLOT0, PIEZO_PIN_SLOT1, PIEZO_PIN_SLOT2};
+static const uint ir_slot_pins[SENSOR_SLOT_COUNT]    = {IR_PIN_SLOT0,    IR_PIN_SLOT1,    IR_PIN_SLOT2};
+
+// === PIEZO SENSOR STATE (per slot) ===
+static volatile bool     piezo_enabled[SENSOR_SLOT_COUNT]      = {false, false, false};
+static volatile uint32_t piezo_count[SENSOR_SLOT_COUNT]        = {0, 0, 0};
+static volatile uint32_t piezo_last_trigger[SENSOR_SLOT_COUNT] = {0, 0, 0};
+static piezo_callback_t  piezo_callback[SENSOR_SLOT_COUNT]     = {NULL, NULL, NULL};
 
 // === HALL EFFECT SENSOR STATE ===
 static volatile bool hall_effect_enabled = false;
@@ -19,54 +23,45 @@ static volatile uint32_t hall_effect_count = 0;
 static volatile uint32_t hall_effect_last_trigger = 0;
 static hall_effect_callback_t hall_effect_callback = NULL;
 
-// === IR SENSOR STATE ===
-static volatile bool ir_enabled = false;
-static volatile uint32_t ir_count = 0;
-static volatile uint32_t ir_last_trigger = 0;
-static ir_callback_t ir_callback = NULL;
+// === IR SENSOR STATE (per slot) ===
+static volatile bool     ir_enabled[SENSOR_SLOT_COUNT]      = {false, false, false};
+static volatile uint32_t ir_count[SENSOR_SLOT_COUNT]        = {0, 0, 0};
+static volatile uint32_t ir_last_trigger[SENSOR_SLOT_COUNT] = {0, 0, 0};
+static ir_callback_t     ir_callback[SENSOR_SLOT_COUNT]     = {NULL, NULL, NULL};
 
 // === INTERRUPT HANDLERS ===
 
 /**
- * Piezo sensor interrupt handler
+ * Piezo sensor interrupt handler (slot-aware)
  * Triggered when piezo detects vibration/impact (pill dropping)
  */
-void piezo_interrupt_handler(uint gpio, uint32_t events) {
-    // Get current time for debouncing
+static void piezo_interrupt_handler(uint gpio, uint32_t events, uint8_t slot) {
     uint32_t current_time = to_ms_since_boot(get_absolute_time());
-    
-    // Check if this is our pin and if sensor is enabled
-    if (gpio != PIEZO_PIN) {
-        printf("PIEZO DEBUG: Wrong pin (%d vs %d)\n", gpio, PIEZO_PIN);
+
+    if (!piezo_enabled[slot]) {
+        printf("PIEZO DEBUG: Interrupt on slot %d but sensor disabled!\n", slot);
         return;
     }
-    
-    if (!piezo_enabled) {
-        printf("PIEZO DEBUG: Interrupt triggered but sensor disabled! Enable with 'P' command.\n");
+
+    if ((current_time - piezo_last_trigger[slot]) < PIEZO_DEBOUNCE_MS) {
+        printf("PIEZO DEBUG: Debounced slot %d (too soon: %lu ms)\n",
+               slot, current_time - piezo_last_trigger[slot]);
         return;
     }
-    
-    // Debounce check
-    if ((current_time - piezo_last_trigger) < PIEZO_DEBOUNCE_MS) {
-        printf("PIEZO DEBUG: Debounced (too soon: %lu ms)\n", 
-               current_time - piezo_last_trigger);
-        return; // Ignore if too soon (vibration settling)
-    }
-    
-    // Detect on both edges (vibration start/stop)
+
     if (events & (GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL)) {
-        piezo_last_trigger = current_time;
-        piezo_count++;
-        
-        bool gpio_state = gpio_get(PIEZO_PIN);
+        piezo_last_trigger[slot] = current_time;
+        piezo_count[slot]++;
+
+        bool gpio_state = gpio_get(gpio);
         const char* edge_type = (events & GPIO_IRQ_EDGE_RISE) ? "RISING" : "FALLING";
-        
-        printf(">>> PIEZO INTERRUPT! Edge: %s, GPIO State: %s, Count: %d, Time: %lu ms <<<\n", 
-               edge_type, gpio_state ? "HIGH" : "LOW", piezo_count, current_time);
-        
-        // Call user callback if set
-        if (piezo_callback != NULL) {
-            piezo_callback();
+
+        printf(">>> PIEZO INTERRUPT! Slot %d, Edge: %s, GPIO State: %s, Count: %lu, Time: %lu ms <<<\n",
+               slot, edge_type, gpio_state ? "HIGH" : "LOW",
+               (unsigned long)piezo_count[slot], (unsigned long)current_time);
+
+        if (piezo_callback[slot] != NULL) {
+            piezo_callback[slot]();
         }
     }
 }
@@ -113,35 +108,31 @@ void hall_effect_interrupt_handler(uint gpio, uint32_t events) {
 }
 
 /**
- * IR sensor interrupt handler
+ * IR sensor interrupt handler (slot-aware)
  * Triggered when IR beam is broken or restored
  */
-void ir_interrupt_handler(uint gpio, uint32_t events) {
-    // Get current time for debouncing
+static void ir_interrupt_handler(uint gpio, uint32_t events, uint8_t slot) {
     uint32_t current_time = to_ms_since_boot(get_absolute_time());
-    
-    // Check if this is our pin and if sensor is enabled
-    if (gpio != IR_PIN || !ir_enabled) {
+
+    if (!ir_enabled[slot]) {
         return;
     }
-    
-    // Debounce check
-    if ((current_time - ir_last_trigger) < IR_DEBOUNCE_MS) {
-        return; // Ignore if too soon (noise filtering)
+
+    if ((current_time - ir_last_trigger[slot]) < IR_DEBOUNCE_MS) {
+        return;
     }
-    
-    // Detect on both edges (beam broken/restored)
+
     if (events & (GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL)) {
-        ir_last_trigger = current_time;
-        ir_count++;
-        
-        bool beam_broken = !gpio_get(IR_PIN); // Assuming active low (beam broken = LOW)
-        printf("IR SENSOR: Beam %s! Count: %d at %lu ms\n", 
-               beam_broken ? "BROKEN" : "RESTORED", ir_count, current_time);
-        
-        // Call user callback if set
-        if (ir_callback != NULL) {
-            ir_callback();
+        ir_last_trigger[slot] = current_time;
+        ir_count[slot]++;
+
+        bool beam_broken = !gpio_get(gpio); // Active low (beam broken = LOW)
+        printf("IR SENSOR: Slot %d Beam %s! Count: %lu at %lu ms\n",
+               slot, beam_broken ? "BROKEN" : "RESTORED",
+               (unsigned long)ir_count[slot], (unsigned long)current_time);
+
+        if (ir_callback[slot] != NULL) {
+            ir_callback[slot]();
         }
     }
 }
@@ -153,15 +144,13 @@ void ir_interrupt_handler(uint gpio, uint32_t events) {
  */
 void gpio_unified_interrupt_handler(uint gpio, uint32_t events) {
     switch (gpio) {
-        case PIEZO_PIN:
-            piezo_interrupt_handler(gpio, events);
-            break;
-        case HALL_EFFECT_PIN:
-            hall_effect_interrupt_handler(gpio, events);
-            break;
-        case IR_PIN:
-            ir_interrupt_handler(gpio, events);
-            break;
+        case PIEZO_PIN_SLOT0:  piezo_interrupt_handler(gpio, events, 0); break;
+        case PIEZO_PIN_SLOT1:  piezo_interrupt_handler(gpio, events, 1); break;
+        case PIEZO_PIN_SLOT2:  piezo_interrupt_handler(gpio, events, 2); break;
+        case HALL_EFFECT_PIN:  hall_effect_interrupt_handler(gpio, events); break;
+        case IR_PIN_SLOT0:     ir_interrupt_handler(gpio, events, 0); break;
+        case IR_PIN_SLOT1:     ir_interrupt_handler(gpio, events, 1); break;
+        case IR_PIN_SLOT2:     ir_interrupt_handler(gpio, events, 2); break;
         default:
             printf("UNKNOWN GPIO INTERRUPT: pin %d, events 0x%x\n", gpio, events);
             break;
@@ -171,76 +160,108 @@ void gpio_unified_interrupt_handler(uint gpio, uint32_t events) {
 // === INITIALIZATION ===
 
 void sensor_interrupts_init(void) {
-    // Initialize piezo sensor pin
-    gpio_init(PIEZO_PIN);
-    gpio_set_dir(PIEZO_PIN, GPIO_IN);
-    gpio_pull_down(PIEZO_PIN);  // Pull down - but piezo naturally rests at ~1V
-    
-    // Initialize hall effect sensor pin
+    // Initialize per-slot piezo and IR pins
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        gpio_init(piezo_slot_pins[slot]);
+        gpio_set_dir(piezo_slot_pins[slot], GPIO_IN);
+        gpio_pull_down(piezo_slot_pins[slot]);  // Pull down - but piezo naturally rests at ~1V
+
+        gpio_init(ir_slot_pins[slot]);
+        gpio_set_dir(ir_slot_pins[slot], GPIO_IN);
+        gpio_pull_up(ir_slot_pins[slot]);  // IR sensor active low (beam broken = LOW)
+    }
+
+    // Initialize hall effect sensor pin (shared)
     gpio_init(HALL_EFFECT_PIN);
     gpio_set_dir(HALL_EFFECT_PIN, GPIO_IN);
-    gpio_pull_down(HALL_EFFECT_PIN);  // Changed to pull down for 5V sensor
-    
-    // Initialize IR sensor pin
-    gpio_init(IR_PIN);
-    gpio_set_dir(IR_PIN, GPIO_IN);
-    gpio_pull_up(IR_PIN);  // Pull up - IR sensor typically active low (beam broken = LOW)
-    
-    // Set up unified GPIO interrupt callback - this is the key fix!
-    // The Pico SDK only allows one global GPIO interrupt handler
-    gpio_set_irq_enabled_with_callback(PIEZO_PIN, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &gpio_unified_interrupt_handler);
+    gpio_pull_down(HALL_EFFECT_PIN);
+
+    // Register unified callback (SDK only allows one global GPIO handler)
+    gpio_set_irq_enabled_with_callback(PIEZO_PIN_SLOT0,
+        GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true, &gpio_unified_interrupt_handler);
+
+    // Enable IRQs for remaining pins (callback already registered above)
+    gpio_set_irq_enabled(PIEZO_PIN_SLOT1, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(PIEZO_PIN_SLOT2, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(HALL_EFFECT_PIN, GPIO_IRQ_EDGE_FALL, true);
-    gpio_set_irq_enabled(IR_PIN, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
-    
-    // Initialize state
-    piezo_enabled = false;
-    hall_effect_enabled = false;
-    ir_enabled = false;
-    piezo_count = 0;
-    hall_effect_count = 0;
-    ir_count = 0;
-    piezo_callback = NULL;
-    hall_effect_callback = NULL;
-    ir_callback = NULL;
-    
+    gpio_set_irq_enabled(IR_PIN_SLOT0, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(IR_PIN_SLOT1, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+    gpio_set_irq_enabled(IR_PIN_SLOT2, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
+
+    // Initialize per-slot state
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        piezo_enabled[slot]      = false;
+        piezo_count[slot]        = 0;
+        piezo_last_trigger[slot] = 0;
+        piezo_callback[slot]     = NULL;
+        ir_enabled[slot]         = false;
+        ir_count[slot]           = 0;
+        ir_last_trigger[slot]    = 0;
+        ir_callback[slot]        = NULL;
+    }
+
+    // Initialize hall effect state
+    hall_effect_enabled      = false;
+    hall_effect_count        = 0;
+    hall_effect_last_trigger = 0;
+    hall_effect_callback     = NULL;
+
     printf("Sensor interrupts initialized:\n");
-    printf("  Piezo sensor: GPIO %d\n", PIEZO_PIN);
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        printf("  Slot %d: Piezo GPIO %d, IR GPIO %d\n",
+               slot, piezo_slot_pins[slot], ir_slot_pins[slot]);
+    }
     printf("  Hall effect sensor: GPIO %d\n", HALL_EFFECT_PIN);
-    printf("  IR sensor: GPIO %d\n", IR_PIN);
 }
 
-// === PIEZO SENSOR FUNCTIONS ===
+// === SLOT-INDEXED PIEZO FUNCTIONS ===
 
-void piezo_set_callback(piezo_callback_t callback) {
-    piezo_callback = callback;
+void piezo_set_callback_slot(uint8_t slot, piezo_callback_t callback) {
+    if (slot >= SENSOR_SLOT_COUNT) return;
+    piezo_callback[slot] = callback;
 }
 
-void piezo_enable(void) {
-    piezo_enabled = true;
-    printf("Piezo sensor ENABLED\n");
+void piezo_enable_slot(uint8_t slot) {
+    if (slot >= SENSOR_SLOT_COUNT) return;
+    piezo_enabled[slot] = true;
+    printf("Piezo sensor slot %d ENABLED (GPIO %d)\n", slot, piezo_slot_pins[slot]);
 }
 
-void piezo_disable(void) {
-    piezo_enabled = false;
-    printf("Piezo sensor DISABLED\n");
+void piezo_disable_slot(uint8_t slot) {
+    if (slot >= SENSOR_SLOT_COUNT) return;
+    piezo_enabled[slot] = false;
+    printf("Piezo sensor slot %d DISABLED\n", slot);
 }
 
-bool piezo_is_enabled(void) {
-    return piezo_enabled;
+bool piezo_is_enabled_slot(uint8_t slot) {
+    if (slot >= SENSOR_SLOT_COUNT) return false;
+    return piezo_enabled[slot];
 }
 
-uint32_t piezo_get_count(void) {
-    return piezo_count;
+uint32_t piezo_get_count_slot(uint8_t slot) {
+    if (slot >= SENSOR_SLOT_COUNT) return 0;
+    return piezo_count[slot];
 }
 
-void piezo_reset_count(void) {
-    piezo_count = 0;
-    printf("Piezo count reset\n");
+void piezo_reset_count_slot(uint8_t slot) {
+    if (slot >= SENSOR_SLOT_COUNT) return;
+    piezo_count[slot] = 0;
 }
 
-uint32_t piezo_get_last_trigger_time(void) {
-    return piezo_last_trigger;
+uint32_t piezo_get_last_trigger_time_slot(uint8_t slot) {
+    if (slot >= SENSOR_SLOT_COUNT) return 0;
+    return piezo_last_trigger[slot];
 }
+
+// === LEGACY SLOT-0 WRAPPERS (backward compatibility) ===
+
+void piezo_set_callback(piezo_callback_t callback) { piezo_set_callback_slot(0, callback); }
+void piezo_enable(void)                            { piezo_enable_slot(0); }
+void piezo_disable(void)                           { piezo_disable_slot(0); }
+bool piezo_is_enabled(void)                        { return piezo_is_enabled_slot(0); }
+uint32_t piezo_get_count(void)                     { return piezo_get_count_slot(0); }
+void piezo_reset_count(void)                       { piezo_reset_count_slot(0); }
+uint32_t piezo_get_last_trigger_time(void)          { return piezo_get_last_trigger_time_slot(0); }
 
 // === HALL EFFECT SENSOR FUNCTIONS ===
 
@@ -275,161 +296,193 @@ uint32_t hall_effect_get_last_trigger_time(void) {
     return hall_effect_last_trigger;
 }
 
-// === IR SENSOR FUNCTIONS ===
+// === SLOT-INDEXED IR FUNCTIONS ===
 
-void ir_set_callback(ir_callback_t callback) {
-    ir_callback = callback;
+void ir_set_callback_slot(uint8_t slot, ir_callback_t callback) {
+    if (slot >= SENSOR_SLOT_COUNT) return;
+    ir_callback[slot] = callback;
 }
 
-void ir_enable(void) {
-    ir_enabled = true;
-    printf("IR sensor ENABLED\n");
+void ir_enable_slot(uint8_t slot) {
+    if (slot >= SENSOR_SLOT_COUNT) return;
+    ir_enabled[slot] = true;
+    printf("IR sensor slot %d ENABLED (GPIO %d)\n", slot, ir_slot_pins[slot]);
 }
 
-void ir_disable(void) {
-    ir_enabled = false;
-    printf("IR sensor DISABLED\n");
+void ir_disable_slot(uint8_t slot) {
+    if (slot >= SENSOR_SLOT_COUNT) return;
+    ir_enabled[slot] = false;
+    printf("IR sensor slot %d DISABLED\n", slot);
 }
 
-bool ir_is_enabled(void) {
-    return ir_enabled;
+bool ir_is_enabled_slot(uint8_t slot) {
+    if (slot >= SENSOR_SLOT_COUNT) return false;
+    return ir_enabled[slot];
 }
 
-uint32_t ir_get_count(void) {
-    return ir_count;
+uint32_t ir_get_count_slot(uint8_t slot) {
+    if (slot >= SENSOR_SLOT_COUNT) return 0;
+    return ir_count[slot];
 }
 
-void ir_reset_count(void) {
-    ir_count = 0;
-    printf("IR sensor count reset\n");
+void ir_reset_count_slot(uint8_t slot) {
+    if (slot >= SENSOR_SLOT_COUNT) return;
+    ir_count[slot] = 0;
 }
+
+bool ir_is_beam_broken_slot(uint8_t slot) {
+    if (slot >= SENSOR_SLOT_COUNT) return false;
+    return !gpio_get(ir_slot_pins[slot]); // Active low (beam broken = LOW)
+}
+
+// === LEGACY SLOT-0 WRAPPERS (backward compatibility) ===
+
+void ir_set_callback(ir_callback_t callback) { ir_set_callback_slot(0, callback); }
+void ir_enable(void)                          { ir_enable_slot(0); }
+void ir_disable(void)                         { ir_disable_slot(0); }
+bool ir_is_enabled(void)                      { return ir_is_enabled_slot(0); }
+uint32_t ir_get_count(void)                   { return ir_get_count_slot(0); }
+void ir_reset_count(void)                     { ir_reset_count_slot(0); }
+bool ir_is_beam_broken(void)                  { return ir_is_beam_broken_slot(0); }
 
 uint32_t ir_get_last_trigger_time(void) {
-    return ir_last_trigger;
-}
-
-bool ir_is_beam_broken(void) {
-    return !gpio_get(IR_PIN); // Assuming active low (beam broken = LOW)
+    return ir_last_trigger[0];
 }
 
 // === UTILITY FUNCTIONS ===
 
 void sensor_interrupts_status(void) {
     printf("\n=== SENSOR STATUS ===\n");
-    
-    printf("Piezo Sensor (GPIO %d):\n", PIEZO_PIN);
-    printf("  Status: %s\n", piezo_enabled ? "ENABLED" : "DISABLED");
-    printf("  Count: %d triggers\n", piezo_count);
-    printf("  Last trigger: %lu ms ago\n", 
-           piezo_last_trigger > 0 ? (to_ms_since_boot(get_absolute_time()) - piezo_last_trigger) : 0);
-    
-    printf("Hall Effect Sensor (GPIO %d):\n", HALL_EFFECT_PIN);
-    printf("  Status: %s\n", hall_effect_enabled ? "ENABLED" : "DISABLED");
-    printf("  Count: %d triggers\n", hall_effect_count);
-    printf("  Last trigger: %lu ms ago\n", 
-           hall_effect_last_trigger > 0 ? (to_ms_since_boot(get_absolute_time()) - hall_effect_last_trigger) : 0);
-    
-    printf("IR Sensor (GPIO %d):\n", IR_PIN);
-    printf("  Status: %s\n", ir_enabled ? "ENABLED" : "DISABLED");
-    printf("  Count: %d triggers\n", ir_count);
-    printf("  Beam state: %s\n", ir_is_beam_broken() ? "BROKEN" : "CLEAR");
-    printf("  Last trigger: %lu ms ago\n", 
-           ir_last_trigger > 0 ? (to_ms_since_boot(get_absolute_time()) - ir_last_trigger) : 0);
-    
+    uint32_t now = to_ms_since_boot(get_absolute_time());
+
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        printf("Slot %d:\n", slot);
+        printf("  Piezo (GPIO %d): %s | Count: %lu | Last: %lu ms ago\n",
+               piezo_slot_pins[slot],
+               piezo_enabled[slot] ? "ENABLED" : "DISABLED",
+               (unsigned long)piezo_count[slot],
+               piezo_last_trigger[slot] > 0 ? (unsigned long)(now - piezo_last_trigger[slot]) : 0UL);
+        printf("  IR    (GPIO %d): %s | Count: %lu | Beam: %s | Last: %lu ms ago\n",
+               ir_slot_pins[slot],
+               ir_enabled[slot] ? "ENABLED" : "DISABLED",
+               (unsigned long)ir_count[slot],
+               ir_is_beam_broken_slot(slot) ? "BROKEN" : "CLEAR",
+               ir_last_trigger[slot] > 0 ? (unsigned long)(now - ir_last_trigger[slot]) : 0UL);
+    }
+
+    printf("Hall Effect (GPIO %d): %s | Count: %lu | Last: %lu ms ago\n",
+           HALL_EFFECT_PIN,
+           hall_effect_enabled ? "ENABLED" : "DISABLED",
+           (unsigned long)hall_effect_count,
+           hall_effect_last_trigger > 0 ? (unsigned long)(now - hall_effect_last_trigger) : 0UL);
     printf("====================\n\n");
 }
 
 void sensor_interrupts_reset_all(void) {
-    piezo_reset_count();
-    hall_effect_reset_count();
-    ir_reset_count();
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        piezo_count[slot] = 0;
+        ir_count[slot] = 0;
+    }
+    hall_effect_count = 0;
     printf("All sensor counts reset\n");
 }
 
 void sensor_interrupts_disable_all(void) {
-    piezo_disable();
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        piezo_disable_slot(slot);
+        ir_disable_slot(slot);
+    }
     hall_effect_disable();
-    ir_disable();
     printf("All sensors DISABLED\n");
 }
 
 void sensor_interrupts_enable_all(void) {
-    piezo_enable();
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        piezo_enable_slot(slot);
+        ir_enable_slot(slot);
+    }
     hall_effect_enable();
-    ir_enable();
     printf("All sensors ENABLED\n");
 }
 
 void sensor_interrupts_test_gpio_states(void) {
     printf("\n=== GPIO STATE TEST ===\n");
-    
-    // Read raw GPIO states
-    bool piezo_state = gpio_get(PIEZO_PIN);
-    bool hall_state = gpio_get(HALL_EFFECT_PIN);
-    bool ir_state = gpio_get(IR_PIN);
-    
     printf("Raw GPIO readings:\n");
-    printf("  GPIO %d (Piezo): %s (%.1fV expected)\n", 
-           PIEZO_PIN, piezo_state ? "HIGH" : "LOW", piezo_state ? 3.3 : 0.0);
-    printf("  GPIO %d (Hall Effect): %s (%.1fV expected)\n", 
-           HALL_EFFECT_PIN, hall_state ? "HIGH" : "LOW", hall_state ? 3.3 : 0.0);
-    printf("  GPIO %d (IR): %s (%.1fV expected)\n", 
-           IR_PIN, ir_state ? "HIGH" : "LOW", ir_state ? 3.3 : 0.0);
-    
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        bool pstate = gpio_get(piezo_slot_pins[slot]);
+        bool istate = gpio_get(ir_slot_pins[slot]);
+        printf("  Slot %d Piezo (GPIO %d): %s | IR (GPIO %d): %s\n",
+               slot, piezo_slot_pins[slot], pstate ? "HIGH" : "LOW",
+               ir_slot_pins[slot], istate ? "HIGH" : "LOW");
+    }
+    bool hall_state = gpio_get(HALL_EFFECT_PIN);
+    printf("  Hall Effect (GPIO %d): %s\n",
+           HALL_EFFECT_PIN, hall_state ? "HIGH" : "LOW");
+
     printf("\nInterrupt enable status:\n");
-    printf("  Piezo enabled: %s\n", piezo_enabled ? "YES" : "NO");
-    printf("  Hall Effect enabled: %s\n", hall_effect_enabled ? "YES" : "NO");  
-    printf("  IR enabled: %s\n", ir_enabled ? "YES" : "NO");
-    
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        printf("  Slot %d: Piezo=%s | IR=%s\n",
+               slot,
+               piezo_enabled[slot] ? "YES" : "NO",
+               ir_enabled[slot]    ? "YES" : "NO");
+    }
+    printf("  Hall Effect: %s\n", hall_effect_enabled ? "YES" : "NO");
+
     if (hall_state && !hall_effect_enabled) {
         printf("\nWARNING: Hall Effect reads HIGH but interrupts disabled!\n");
-        printf("Try: Press 'H' to enable hall effect interrupts\n");
     }
-    
     if (hall_state) {
         printf("\nNOTE: 5V on 3.3V GPIO detected!\n");
-        printf("- This may damage the GPIO or cause unreliable operation\n");
-        printf("- Consider using a voltage divider (3.3V = 5V * (3.3/(3.3+1.7)))\n");
-        printf("- Or use a 3.3V hall effect sensor instead\n");
+        printf("- Consider using a voltage divider or 3.3V sensor\n");
     }
 }
 
-/**
- * Debug function to check interrupt configuration
- */
 void sensor_interrupts_debug_config(void) {
     printf("\n=== INTERRUPT CONFIGURATION DEBUG ===\n");
-    
-    // Check GPIO directions
+
     printf("GPIO Directions:\n");
-    printf("  GPIO %d (Piezo): %s\n", PIEZO_PIN, gpio_is_dir_out(PIEZO_PIN) ? "OUTPUT" : "INPUT");
-    printf("  GPIO %d (Hall): %s\n", HALL_EFFECT_PIN, gpio_is_dir_out(HALL_EFFECT_PIN) ? "OUTPUT" : "INPUT");
-    printf("  GPIO %d (IR): %s\n", IR_PIN, gpio_is_dir_out(IR_PIN) ? "OUTPUT" : "INPUT");
-    
-    // Check pull resistors (this is harder to read back, but we'll show our config)
-    printf("\nPull Resistor Configuration (from initialization):\n");
-    printf("  GPIO %d (Piezo): PULL_DOWN\n", PIEZO_PIN);
-    printf("  GPIO %d (Hall): PULL_DOWN\n", HALL_EFFECT_PIN);  
-    printf("  GPIO %d (IR): PULL_UP\n", IR_PIN);
-    
-    // Check interrupt enabled status
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        printf("  Slot %d Piezo (GPIO %d): %s\n",
+               slot, piezo_slot_pins[slot],
+               gpio_is_dir_out(piezo_slot_pins[slot]) ? "OUTPUT" : "INPUT");
+        printf("  Slot %d IR    (GPIO %d): %s\n",
+               slot, ir_slot_pins[slot],
+               gpio_is_dir_out(ir_slot_pins[slot]) ? "OUTPUT" : "INPUT");
+    }
+    printf("  Hall (GPIO %d): %s\n",
+           HALL_EFFECT_PIN, gpio_is_dir_out(HALL_EFFECT_PIN) ? "OUTPUT" : "INPUT");
+
+    printf("\nPull Resistor Configuration:\n");
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        printf("  Slot %d Piezo (GPIO %d): PULL_DOWN\n", slot, piezo_slot_pins[slot]);
+        printf("  Slot %d IR    (GPIO %d): PULL_UP\n",   slot, ir_slot_pins[slot]);
+    }
+    printf("  Hall (GPIO %d): PULL_DOWN\n", HALL_EFFECT_PIN);
+
     printf("\nSensor Enable Status:\n");
-    printf("  Piezo enabled: %s\n", piezo_enabled ? "YES" : "NO");
-    printf("  Hall Effect enabled: %s\n", hall_effect_enabled ? "YES" : "NO");
-    printf("  IR enabled: %s\n", ir_enabled ? "YES" : "NO");
-    
-    // Current GPIO states
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        printf("  Slot %d: Piezo=%s | IR=%s\n",
+               slot,
+               piezo_enabled[slot] ? "YES" : "NO",
+               ir_enabled[slot]    ? "YES" : "NO");
+    }
+    printf("  Hall Effect: %s\n", hall_effect_enabled ? "YES" : "NO");
+
     printf("\nCurrent GPIO States:\n");
-    printf("  GPIO %d (Piezo): %s\n", PIEZO_PIN, gpio_get(PIEZO_PIN) ? "HIGH" : "LOW");
-    printf("  GPIO %d (Hall): %s\n", HALL_EFFECT_PIN, gpio_get(HALL_EFFECT_PIN) ? "HIGH" : "LOW");
-    printf("  GPIO %d (IR): %s\n", IR_PIN, gpio_get(IR_PIN) ? "HIGH" : "LOW");
-    
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        printf("  Slot %d Piezo (GPIO %d): %s | IR (GPIO %d): %s\n",
+               slot, piezo_slot_pins[slot],
+               gpio_get(piezo_slot_pins[slot]) ? "HIGH" : "LOW",
+               ir_slot_pins[slot],
+               gpio_get(ir_slot_pins[slot]) ? "HIGH" : "LOW");
+    }
+    printf("  Hall (GPIO %d): %s\n",
+           HALL_EFFECT_PIN, gpio_get(HALL_EFFECT_PIN) ? "HIGH" : "LOW");
+
     printf("\nTo test interrupts:\n");
-    printf("  1. Press 'P' to enable piezo interrupts\n");
-    printf("  2. Press 'H' to enable hall effect interrupts  \n");
-    printf("  3. Press 'I' to enable IR interrupts\n");
+    printf("  1. Press 'P' to enable slot-0 piezo\n");
+    printf("  2. Press 'H' to enable hall effect\n");
+    printf("  3. Press 'I' to enable slot-0 IR\n");
     printf("  4. Trigger sensors and watch for interrupt messages\n");
     printf("=====================================\n\n");
-    
-    printf("=====================\n\n");
 }

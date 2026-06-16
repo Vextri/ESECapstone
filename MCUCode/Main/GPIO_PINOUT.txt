@@ -20,10 +20,14 @@
   GPIO 14  ->  DRV8833 BIN1  (Coil B+)
   GPIO 15  ->  DRV8833 BIN2  (Coil B-)
 
---- SENSORS ---
-  GPIO  5  ->  Piezo sensor
-  GPIO  6  ->  Hall effect sensor
-  GPIO  7  ->  IR sensor
+--- SENSORS (per slot) ---
+  GPIO  5  ->  Piezo sensor    (Slot 0)
+  GPIO  7  ->  IR sensor       (Slot 0)
+  GPIO 16  ->  Piezo sensor    (Slot 1)
+  GPIO 17  ->  IR sensor       (Slot 1)
+  GPIO 18  ->  Piezo sensor    (Slot 2)
+  GPIO 19  ->  IR sensor       (Slot 2)
+  GPIO  6  ->  Hall effect sensor (shared, all slots)
 
 --- ESP UART (uart1) ---
   GPIO 20  ->  TX  (Pico -> ESP)
@@ -42,7 +46,6 @@
   FREE / UNASSIGNED GPIOs
 ============================================================
   GPIO  4
-  GPIO 16 - 19
   GPIO 22
   GPIO 26 - 28  (ADC capable)
 

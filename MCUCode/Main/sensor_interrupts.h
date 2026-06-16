@@ -12,10 +12,25 @@
 #include "pico/stdlib.h"
 #include <stdbool.h>
 
-// Pin definitions
-#define PIEZO_PIN 5             // GPIO pin for piezo sensor
+// Number of dispenser slots with piezo + IR sensors
+#define SENSOR_SLOT_COUNT 3
+
+// Per-slot piezo pin definitions
+#define PIEZO_PIN_SLOT0 5       // GPIO pin for slot 0 piezo sensor
+#define PIEZO_PIN_SLOT1 16      // GPIO pin for slot 1 piezo sensor
+#define PIEZO_PIN_SLOT2 18      // GPIO pin for slot 2 piezo sensor
+
+// Per-slot IR pin definitions
+#define IR_PIN_SLOT0 7          // GPIO pin for slot 0 IR sensor
+#define IR_PIN_SLOT1 17         // GPIO pin for slot 1 IR sensor
+#define IR_PIN_SLOT2 19         // GPIO pin for slot 2 IR sensor
+
+// Legacy single-slot aliases (slot 0) — kept for backward compatibility
+#define PIEZO_PIN       PIEZO_PIN_SLOT0
+#define IR_PIN          IR_PIN_SLOT0
+
+// Hall effect sensor (shared across all slots)
 #define HALL_EFFECT_PIN 6       // GPIO pin for hall effect sensor
-#define IR_PIN 7                // GPIO pin for IR sensor
 
 // Debounce settings
 #define PIEZO_DEBOUNCE_MS 100   // Debounce time for piezo (vibration settling)
@@ -156,10 +171,30 @@ void ir_reset_count(void);
 uint32_t ir_get_last_trigger_time(void);
 
 /**
- * Get current state of IR beam
+ * Get current state of IR beam (slot 0)
  * @return true if beam is broken, false if beam is clear
  */
 bool ir_is_beam_broken(void);
+
+// === SLOT-INDEXED PIEZO FUNCTIONS (slots 0-2) ===
+
+void piezo_set_callback_slot(uint8_t slot, piezo_callback_t callback);
+void piezo_enable_slot(uint8_t slot);
+void piezo_disable_slot(uint8_t slot);
+bool piezo_is_enabled_slot(uint8_t slot);
+uint32_t piezo_get_count_slot(uint8_t slot);
+void piezo_reset_count_slot(uint8_t slot);
+uint32_t piezo_get_last_trigger_time_slot(uint8_t slot);
+
+// === SLOT-INDEXED IR FUNCTIONS (slots 0-2) ===
+
+void ir_set_callback_slot(uint8_t slot, ir_callback_t callback);
+void ir_enable_slot(uint8_t slot);
+void ir_disable_slot(uint8_t slot);
+bool ir_is_enabled_slot(uint8_t slot);
+uint32_t ir_get_count_slot(uint8_t slot);
+void ir_reset_count_slot(uint8_t slot);
+bool ir_is_beam_broken_slot(uint8_t slot);
 
 // === UTILITY FUNCTIONS ===
 
