@@ -72,9 +72,21 @@ void stepper_set_direction(uint8_t motor_idx, stepper_direction_t direction) {
     if (motor_idx >= STEPPER_MOTOR_COUNT) return;
     motors[motor_idx].direction      = direction;
     motors[motor_idx].next_step_time = get_absolute_time();
+    if (direction != STEPPER_IDLE) {
+        // Re-energize coils immediately so the driver is active before stepper_task() runs
+        apply_step(motor_idx, motors[motor_idx].step_index);
+    }
 }
 
 void stepper_stop(uint8_t motor_idx) {
+    if (motor_idx >= STEPPER_MOTOR_COUNT) return;
+    motors[motor_idx].direction = STEPPER_IDLE;
+    // Hold last step position — keeps coils energized so the driver stays active
+    // and the motor can restart cleanly. Use stepper_release() to fully deenergize.
+    apply_step(motor_idx, motors[motor_idx].step_index);
+}
+
+void stepper_release(uint8_t motor_idx) {
     if (motor_idx >= STEPPER_MOTOR_COUNT) return;
     motors[motor_idx].direction = STEPPER_IDLE;
     deenergize(motor_idx);

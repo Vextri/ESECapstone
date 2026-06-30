@@ -49,10 +49,18 @@ void stepper_init(void);
 void stepper_set_direction(uint8_t motor_idx, stepper_direction_t direction);
 
 /**
- * Stop the specified motor and de-energize its coils
+ * Stop the specified motor and hold the last step position (coils stay energized).
+ * This keeps the driver active so the motor can restart cleanly.
  * @param motor_idx Motor index
  */
 void stepper_stop(uint8_t motor_idx);
+
+/**
+ * Stop the specified motor and fully de-energize its coils (coast mode).
+ * Use this only when you want to cut power to the motor entirely.
+ * @param motor_idx Motor index
+ */
+void stepper_release(uint8_t motor_idx);
 
 /**
  * Non-blocking update — call this frequently in the main loop.
