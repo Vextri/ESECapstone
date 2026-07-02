@@ -1,0 +1,14 @@
+81.4
+51
+
+
+LED
+5.05 TOP 
+5.6 MID 
+4.5 Bottom
+
+1.4x2 Spacing
+
+Button:
+
+5mm
