@@ -576,7 +576,7 @@ static void lcd_st7796_init(void)
 	lcd_send_cmd(0x11);
 	vTaskDelay(pdMS_TO_TICKS(120));
 	lcd_send_cmd(0x3A); lcd_send_byte(0x55);
-	lcd_send_cmd(0x36); lcd_send_byte(0x28); /* landscape: MV=1, BGR=1 */
+	lcd_send_cmd(0x36); lcd_send_byte(0xE8); /* landscape 180°: MY=1, MX=1, MV=1, BGR=1 */
 	lcd_send_cmd(0x29);
 }
 
@@ -1200,10 +1200,12 @@ static void button_task(void *arg)
 		bool cur_sel = gpio_get_level(BTN_SEL_PIN)  != 0;
 
 		if (!cur_up && prev_up) {
+			ESP_LOGI(TAG, "BTN: UP pressed");
 			btn_event_t e = BTN_EVT_UP;
 			xQueueSend(btn_queue, &e, 0);
 		}
 		if (!cur_dn && prev_dn) {
+			ESP_LOGI(TAG, "BTN: DOWN pressed");
 			btn_event_t e = BTN_EVT_DOWN;
 			xQueueSend(btn_queue, &e, 0);
 		}
@@ -1213,6 +1215,10 @@ static void button_task(void *arg)
 		if (cur_sel && !prev_sel) {
 			TickType_t held = xTaskGetTickCount() - sel_press_tick;
 			btn_event_t e = (held >= pdMS_TO_TICKS(BTN_LONG_MS)) ? BTN_EVT_BACK : BTN_EVT_SELECT;
+			if (e == BTN_EVT_BACK)
+				ESP_LOGI(TAG, "BTN: SEL long-press (BACK)");
+			else
+				ESP_LOGI(TAG, "BTN: SEL short-press (SELECT)");
 			xQueueSend(btn_queue, &e, 0);
 		}
 
@@ -2082,6 +2088,74 @@ static void bridge_process_uart_line(char *line)
 	xSemaphoreGive(bridge_state_mutex);
 }
 
+/* Checks every active slot's schedule against the current time and enqueues a
+ * dispense if a scheduled time matches.  Must be called with the bridge state
+ * mutex already held. */
+static void bridge_check_schedule_locked(pico_bridge_state_t *state)
+{
+	/* Stores the minute-boundary timestamp of the last auto-fire per slot so
+	 * we never queue the same slot twice in the same clock minute. */
+	static time_t last_fired_minute[PILL_SLOT_COUNT];
+	time_t now;
+	struct tm ti;
+	int current_minutes;
+	time_t now_minute;
+	int si;
+	bool any_queued = false;
+
+	now = time(NULL);
+	if (now <= 1700000000 || localtime_r(&now, &ti) == NULL) {
+		return; /* clock not set yet */
+	}
+
+	current_minutes = ti.tm_hour * 60 + ti.tm_min;
+	now_minute = now - ti.tm_sec; /* truncate to minute boundary */
+
+	for (si = 0; si < PILL_SLOT_COUNT; si++) {
+		const pill_slot_state_t *slot = &state->slots[si];
+		char schedule_copy[40];
+		char *saveptr = NULL;
+		char *token;
+
+		if (!slot->is_active || slot->schedule[0] == '\0' ||
+		    strcmp(slot->schedule, "none") == 0) {
+			continue;
+		}
+
+		if (slot->pills_left == 0) {
+			continue; /* empty — skip */
+		}
+
+		if (last_fired_minute[si] == now_minute) {
+			continue; /* already queued this minute */
+		}
+
+		bridge_copy_string(schedule_copy, sizeof(schedule_copy), slot->schedule);
+		token = strtok_r(schedule_copy, ",", &saveptr);
+		while (token != NULL) {
+			int event_minutes;
+
+			if (screen_parse_hhmm(token, &event_minutes) &&
+			    event_minutes == current_minutes) {
+				if (bridge_enqueue_dispense_slot_locked(state, si)) {
+					last_fired_minute[si] = now_minute;
+					ESP_LOGI(TAG,
+						 "Schedule: queued auto-dispense slot %d at %02d:%02d",
+						 si, ti.tm_hour, ti.tm_min);
+					any_queued = true;
+				}
+				break;
+			}
+			token = strtok_r(NULL, ",", &saveptr);
+		}
+	}
+
+	if (any_queued) {
+		bridge_start_next_dispense_locked(state);
+		bridge_state_save_to_nvs(state);
+	}
+}
+
 static void uart_bridge_task(void *arg)
 {
 	char line_buffer[UART_BRIDGE_LINE_SIZE];
@@ -2131,6 +2205,7 @@ static void uart_bridge_task(void *arg)
 
 		if (xSemaphoreTake(bridge_state_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
 			bridge_update_connected_flag_locked();
+			bridge_check_schedule_locked(&bridge_state);
 			xSemaphoreGive(bridge_state_mutex);
 		}
 	}
@@ -2949,7 +3024,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"const setWebEditMode=async(on)=>{const slot=control('control-slot').value;await postForm('/api/edit-mode',{slot,state:on?'on':'off'});webEditActive=on;webEditSlot=slot;};"
 		"const saveProfile=async()=>{const data={slot:control('control-slot').value,med:control('control-med').value,total:control('control-total').value,dose:control('control-dose').value,time:control('control-time').value,schedule:control('control-schedule').value||'none'};await postForm('/api/profile',data);setStatusCopy('Slot settings saved.');await refreshStatus();if(webEditActive){await setWebEditMode(false);setEditPanel(false);}};"
 		"const dispenseSelected=async()=>{await postForm('/api/dispense',{slot:control('control-slot').value});setStatusCopy('Dispense started. Waiting for confirmation...');await refreshStatus();};"
-		"const syncTime=async()=>{const raw=control('control-manual-time').value;if(!raw)throw new Error('missing-time');const epoch=Math.floor(new Date(raw).getTime()/1000);if(!Number.isFinite(epoch)||epoch<=0)throw new Error('invalid-time');await postForm('/api/time-sync',{epoch:String(epoch)});setStatusCopy('Clock sync sent.');};"
+		"const syncTime=async()=>{const raw=control('control-manual-time').value;if(!raw)throw new Error('missing-time');const epoch=Math.floor(new Date(raw+'Z').getTime()/1000);if(!Number.isFinite(epoch)||epoch<=0)throw new Error('invalid-time');await postForm('/api/time-sync',{epoch:String(epoch)});setStatusCopy('Clock sync sent.');};"
 		"const testFeedback=async(result)=>{await postForm('/api/test-feedback',{result});setStatusCopy(result==='success'?'Success alert test sent.':'Failure alert test sent.');};"
 		"const setBridgeState=(connected,status)=>{const pill=document.getElementById('bridge-pill');text('bridge-label',connected?'Connected':'Connecting...');text('bridge-copy',connected?'Live updates are coming in from the dispenser controller.':'Dashboard is running. Waiting for dispenser connection.');if(pill)pill.className=connected?'status-pill online':'status-pill';if(status){text('controller-transport',status);} };"
 		"async function refreshStatus(){"
