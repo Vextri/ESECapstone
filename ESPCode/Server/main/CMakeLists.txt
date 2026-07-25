@@ -1,5 +1,28 @@
 idf_component_register(
-    SRCS "main.c"
+    SRCS
+        "main.c"
+        "audio_feedback.c"
+        "bridge_state.c"
+        "captive_dns.c"
+        "lcd_display.c"
+        "led_feedback.c"
+        "time_utils.c"
+        "uart_bridge.c"
+        "web_server.c"
+        "wifi_ap.c"
     INCLUDE_DIRS "."
-    REQUIRES esp_http_server esp_wifi nvs_flash esp_netif esp_event esp_timer lwip esp_driver_uart
+    REQUIRES 
+        driver 
+        esp_driver_gpio 
+        esp_driver_uart 
+        esp_driver_spi 
+        esp_driver_i2s 
+        esp_driver_rmt 
+        esp_http_server 
+        esp_wifi 
+        nvs_flash 
+        esp_netif 
+        esp_event 
+        esp_timer 
+        lwip
 )
