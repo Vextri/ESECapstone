@@ -307,7 +307,7 @@ int main() {
                     printf("Motor 1 stop (steps: %lu)\n", stepper_get_step_count(STEPPER_MOTOR_1));
                     stepper_stop(STEPPER_MOTOR_1);
                     break;
-
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                
                 // Motor 2 manual control
                 case 'a':
                 case 'A':

@@ -30,8 +30,8 @@
   GPIO  6  ->  Hall effect sensor (shared, all slots)
 
 --- ESP UART (uart1) ---
-  GPIO 20  ->  TX  (Pico -> ESP)
-  GPIO 21  ->  RX  (ESP  -> Pico)
+  GPIO 21  ->  TX  (Pico -> ESP)
+  GPIO 20  ->  RX  (ESP  -> Pico)
 
 ============================================================
   SLOT -> MOTOR MAPPING
