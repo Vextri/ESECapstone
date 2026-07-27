@@ -70,12 +70,14 @@ static const char *TAG = "time_server";
 #define AUDIO_NOTE_EIGHTH_MS     80
 
 #define AUDIO_FREQ_REST 0.0f
+#define AUDIO_FREQ_G3   196.00f
 #define AUDIO_FREQ_A3   220.00f
 #define AUDIO_FREQ_C4   261.63f
 #define AUDIO_FREQ_E4   329.63f
 #define AUDIO_FREQ_G4   392.00f
 #define AUDIO_FREQ_A4   440.00f
 #define AUDIO_FREQ_C5   523.25f
+#define AUDIO_FREQ_E5   659.25f
 
 #define LED_WS2812_GPIO GPIO_NUM_9
 #define LED_COUNT 3
@@ -84,6 +86,9 @@ static const char *TAG = "time_server";
 #define LED_EDIT_R 140
 #define LED_EDIT_G 0
 #define LED_EDIT_B 180
+#define LED_SELECT_R 0
+#define LED_SELECT_G 0
+#define LED_SELECT_B 255
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -125,6 +130,8 @@ typedef struct {
 	char last_ack_action[32];
 	char last_ack_result[32];
 	bool awaiting_dispense_ack;
+	bool awaiting_drawer_open;
+	int drawer_open_slot;
 	int64_t dispense_ack_deadline_us;
 	int64_t last_update_us;
 	int dispense_queue[PILL_SLOT_COUNT];
@@ -145,12 +152,21 @@ static pico_bridge_state_t bridge_state;
 #define LCD_BL     5
 
 /* ── Physical buttons (active-low, internal pull-up) ──────────────────────── */
+#define BTN_LEFT_PIN 36
+#define BTN_RIGHT_PIN 37
 #define BTN_UP_PIN   38
 #define BTN_DOWN_PIN 39
-#define BTN_SEL_PIN  40
+#define BTN_OK_PIN   40
+#define HALL_SIGNAL_PIN 33
+#define HALL_TRIGGER_LEVEL 0
+#define HALL_POLL_MS 20
 #define BTN_LONG_MS  700
+#define BTN_DEBOUNCE_MS 35
+#define BTN_DOWN_DEBOUNCE_MS 70
 #define UI_INACTIVITY_TIMEOUT_MS 20000
 #define UI_VISIBLE_SLOT_COUNT 3
+#define UI_DISPENSE_FEEDBACK_MS 1700
+#define UI_SAVE_FEEDBACK_MS 1400
 
 #define SCREEN_W  480
 #define SCREEN_H  320
@@ -186,6 +202,8 @@ typedef enum {
 	LED_EVENT_FAILURE = 2,
 	LED_EVENT_EDIT_BEGIN = 3,
 	LED_EVENT_EDIT_END = 4,
+	LED_EVENT_SLOT_SELECT = 5,
+	LED_EVENT_SLOT_CLEAR = 6,
 } led_event_t;
 
 typedef struct {
@@ -205,17 +223,19 @@ static rmt_encoder_handle_t led_rmt_encoder;
 static led_pixel_t led_pixels[LED_COUNT];
 
 static const audio_note_t success_melody[] = {
-	{AUDIO_FREQ_C4, AUDIO_NOTE_EIGHTH_MS},
 	{AUDIO_FREQ_E4, AUDIO_NOTE_EIGHTH_MS},
 	{AUDIO_FREQ_G4, AUDIO_NOTE_EIGHTH_MS},
-	{AUDIO_FREQ_C5, AUDIO_NOTE_HALF_MS},
+	{AUDIO_FREQ_C5, AUDIO_NOTE_EIGHTH_MS},
+	{AUDIO_FREQ_E5, AUDIO_NOTE_HALF_MS},
 };
 
 static const audio_note_t failure_melody[] = {
-	{AUDIO_FREQ_A4, AUDIO_NOTE_QUARTER_MS},
-	{AUDIO_FREQ_E4, AUDIO_NOTE_QUARTER_MS},
-	{AUDIO_FREQ_C4, AUDIO_NOTE_HALF_MS},
-	{AUDIO_FREQ_A3, AUDIO_NOTE_EIGHTH_MS},
+	{AUDIO_FREQ_G3, AUDIO_NOTE_QUARTER_MS},
+	{AUDIO_FREQ_REST, AUDIO_NOTE_EIGHTH_MS},
+	{AUDIO_FREQ_G3, AUDIO_NOTE_QUARTER_MS},
+	{AUDIO_FREQ_REST, AUDIO_NOTE_EIGHTH_MS},
+	{AUDIO_FREQ_C4, AUDIO_NOTE_QUARTER_MS},
+	{AUDIO_FREQ_A3, AUDIO_NOTE_HALF_MS},
 	{AUDIO_FREQ_REST, AUDIO_NOTE_EIGHTH_MS},
 	{AUDIO_FREQ_A3, AUDIO_NOTE_EIGHTH_MS},
 };
@@ -407,7 +427,7 @@ static void led_set_all(uint8_t r, uint8_t g, uint8_t b)
 	led_ws2812_show();
 }
 
-static void led_apply_base_state(bool edit_active, int edit_slot)
+static void led_apply_base_state(bool edit_active, int edit_slot, bool slot_selected, int selected_slot)
 {
 	if (edit_active) {
 		int led_idx = led_index_from_slot(edit_slot);
@@ -416,6 +436,15 @@ static void led_apply_base_state(bool edit_active, int edit_slot)
 			led_pixels[led_idx].r = LED_EDIT_R;
 			led_pixels[led_idx].g = LED_EDIT_G;
 			led_pixels[led_idx].b = LED_EDIT_B;
+			led_ws2812_show();
+		}
+	} else if (slot_selected) {
+		int led_idx = led_index_from_slot(selected_slot);
+		led_set_all(0, 0, 0);
+		if (led_idx >= 0) {
+			led_pixels[led_idx].r = LED_SELECT_R;
+			led_pixels[led_idx].g = LED_SELECT_G;
+			led_pixels[led_idx].b = LED_SELECT_B;
 			led_ws2812_show();
 		}
 	} else {
@@ -455,8 +484,10 @@ static void led_task(void *arg)
 	(void)arg;
 	bool edit_active = false;
 	int edit_slot = -1;
+	bool slot_selected = false;
+	int selected_slot = -1;
 
-	led_apply_base_state(false, edit_slot);
+	led_apply_base_state(false, edit_slot, slot_selected, selected_slot);
 
 	while (1) {
 		if (xQueueReceive(led_event_queue, &msg, portMAX_DELAY) != pdTRUE) {
@@ -464,8 +495,12 @@ static void led_task(void *arg)
 		}
 
 		if (msg.event == LED_EVENT_SUCCESS) {
+			slot_selected = false;
+			selected_slot = -1;
 			led_flash_sequence(0, 255, 0, 3);
 		} else if (msg.event == LED_EVENT_FAILURE) {
+			slot_selected = false;
+			selected_slot = -1;
 			led_flash_sequence(255, 0, 0, 3);
 		} else if (msg.event == LED_EVENT_EDIT_BEGIN) {
 			edit_active = true;
@@ -473,9 +508,15 @@ static void led_task(void *arg)
 		} else if (msg.event == LED_EVENT_EDIT_END) {
 			edit_active = false;
 			edit_slot = -1;
+		} else if (msg.event == LED_EVENT_SLOT_SELECT) {
+			slot_selected = true;
+			selected_slot = msg.slot;
+		} else if (msg.event == LED_EVENT_SLOT_CLEAR) {
+			slot_selected = false;
+			selected_slot = -1;
 		}
 
-		led_apply_base_state(edit_active, edit_slot);
+		led_apply_base_state(edit_active, edit_slot, slot_selected, selected_slot);
 	}
 }
 
@@ -519,7 +560,17 @@ static void start_led_feedback(void)
 
 /* ── Button event + UI state types ────────────────────────────────────────── */
 typedef enum { BTN_EVT_UP, BTN_EVT_DOWN, BTN_EVT_SELECT, BTN_EVT_BACK } btn_event_t;
-typedef enum { UI_STATUS, UI_SLOT_MENU, UI_ACTION_MENU, UI_EDIT_FIELD } ui_screen_t;
+typedef enum {
+	UI_STATUS,
+	UI_SLOT_MENU,
+	UI_ACTION_MENU,
+	UI_CONFIRM_DISPENSE,
+	UI_EDIT_FIELD,
+	UI_NOTICE_DISPENSING,
+	UI_NOTICE_DISPENSE_SUCCESS,
+	UI_NOTICE_DISPENSE_FAILURE,
+	UI_NOTICE_SAVED,
+} ui_screen_t;
 
 #define EDIT_FIELD_COUNT      4
 #define SCHEDULE_PRESET_COUNT 6
@@ -528,16 +579,18 @@ static const char *const schedule_presets[SCHEDULE_PRESET_COUNT] = {
 	"none", "08:00", "12:00", "20:00", "08:00,20:00", "08:00,14:00,20:00",
 };
 static const char *const schedule_labels[SCHEDULE_PRESET_COUNT] = {
-	"NONE", "08:00", "12:00", "20:00", "08+20", "8+14+20",
+	"NO REMINDER", "08:00 AM", "12:00 PM", "08:00 PM", "8AM + 8PM", "8AM + 2PM + 8PM",
 };
 
 typedef struct {
 	ui_screen_t screen;
 	int         cursor;
 	int         edit_slot;
+	int         dispense_slot;
 	int         edit_total;
 	int         edit_dose;
 	int         edit_sched_idx;
+	TickType_t  feedback_deadline_tick;
 } ui_state_t;
 
 static QueueHandle_t btn_queue;
@@ -594,10 +647,28 @@ static void lcd_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16
 {
 	int row_bytes;
 	int i;
+	uint32_t x_end;
+	uint32_t y_end;
 
 	if (w == 0 || h == 0) {
 		return;
 	}
+	if (x >= SCREEN_W || y >= SCREEN_H) {
+		return;
+	}
+
+	x_end = (uint32_t)x + (uint32_t)w;
+	y_end = (uint32_t)y + (uint32_t)h;
+	if (x_end > SCREEN_W) {
+		w = (uint16_t)(SCREEN_W - x);
+	}
+	if (y_end > SCREEN_H) {
+		h = (uint16_t)(SCREEN_H - y);
+	}
+	if (w == 0 || h == 0) {
+		return;
+	}
+
 	row_bytes = (int)w * 2;
 	if (row_bytes > (int)sizeof(lcd_row_buf)) {
 		row_bytes = (int)sizeof(lcd_row_buf);
@@ -701,14 +772,32 @@ static void lcd_draw_char(uint16_t x, uint16_t y, char c, uint16_t color, uint16
 static void lcd_draw_string(uint16_t x, uint16_t y, const char *str, uint16_t color, uint16_t bg, int scale)
 {
 	char c;
+	uint16_t step;
+	uint16_t char_h;
+
+	if (str == NULL || scale <= 0) {
+		return;
+	}
+	if (y >= SCREEN_H) {
+		return;
+	}
+
+	step = (uint16_t)((5 + 1) * scale);
+	char_h = (uint16_t)(7 * scale);
+	if (y + char_h > SCREEN_H) {
+		return;
+	}
 
 	while (*str) {
+		if (x + (uint16_t)(5 * scale) > SCREEN_W) {
+			break;
+		}
 		c = *str;
 		if (c >= 'a' && c <= 'z') {
 			c = (char)(c - 32);
 		}
 		lcd_draw_char(x, y, c, color, bg, scale);
-		x = (uint16_t)(x + (5 + 1) * scale);
+		x = (uint16_t)(x + step);
 		str++;
 	}
 }
@@ -917,25 +1006,21 @@ static void screen_draw_ui(const pico_bridge_state_t *snapshot)
 	int si;
 	time_t now;
 	struct tm ti;
-	bool alert_fail;
 	bool alert_low;
 	uint16_t hdr_bg;
 	const char *badge_str;
 	uint16_t badge_color;
 
 	/* Scan slots for alert conditions before drawing */
-	alert_fail = false;
 	alert_low  = false;
 	for (si = 0; si < UI_VISIBLE_SLOT_COUNT; si++) {
 		const pill_slot_state_t *s = &snapshot->slots[si];
 		if (!s->is_active) continue;
-		if (strcmp(s->last_dispense_result, "fail") == 0 ||
-		    strcmp(s->last_dispense_result, "timeout") == 0) alert_fail = true;
 		if (s->pills_left >= 0 && s->pills_left < LOW_PILL_THRESHOLD) alert_low = true;
 	}
 
 	/* ── Title bar ───────────────────────────────────────────────── */
-	hdr_bg = alert_fail ? LCD_RED : LCD_DKGREY;
+	hdr_bg = LCD_DKGREY;
 	lcd_fill_rect(0, 0, SCREEN_W, 44, hdr_bg);
 	lcd_draw_string(8, 14, "PILL DISPENSER", LCD_CYAN, hdr_bg, 2);
 
@@ -949,10 +1034,7 @@ static void screen_draw_ui(const pico_bridge_state_t *snapshot)
 	lcd_draw_string(410, 14, buf, LCD_YELLOW, hdr_bg, 2);
 
 	/* Connection / alert badge */
-	if (alert_fail) {
-		badge_str   = "FAIL!";
-		badge_color = LCD_WHITE;
-	} else if (!snapshot->connected) {
+	if (!snapshot->connected) {
 		badge_str   = "WAIT";
 		badge_color = LCD_RED;
 	} else if (alert_low) {
@@ -1040,7 +1122,7 @@ static void screen_draw_ui(const pico_bridge_state_t *snapshot)
 			status_color = LCD_GREEN;
 		} else if (strcmp(slot->last_dispense_result, "fail") == 0 ||
 		           strcmp(slot->last_dispense_result, "timeout") == 0) {
-			status_str   = slot->last_dispense_result[0] == 't' ? "NO-ACK" : "MISSED";
+			status_str   = slot->last_dispense_result[0] == 't' ? "FAIL" : "JAMMED";
 			status_color = LCD_RED;
 		} else if (strcmp(slot->last_dispense_result, "pending") == 0) {
 			status_str   = "PENDING";
@@ -1067,6 +1149,27 @@ static void bridge_copy_string(char *dest, size_t dest_size, const char *src);
 static bool bridge_state_save_to_nvs(const pico_bridge_state_t *state);
 static void bridge_send_dispense_for_slot(int slot_number);
 static void bridge_send_load_profile_for_slot(const pill_slot_state_t *slot_state);
+static void bridge_mark_dispense_taken_locked(pico_bridge_state_t *state, int slot_number);
+
+static void screen_draw_help_bar(const char *text)
+{
+	lcd_fill_rect(0, 300, SCREEN_W, 20, LCD_DKGREY);
+	lcd_draw_hline(0, 300, SCREEN_W, LCD_WHITE);
+	lcd_draw_string(8, 306, text, LCD_WHITE, LCD_DKGREY, 1);
+}
+
+static void screen_draw_slot_position_label(int slot_index)
+{
+	char pos[32];
+	int x;
+
+	snprintf(pos, sizeof(pos), "SLOT %d OF %d", slot_index + 1, UI_VISIBLE_SLOT_COUNT);
+	x = (int)SCREEN_W - 8 - ((int)strlen(pos) * 8);
+	if (x < 180) {
+		x = 180;
+	}
+	lcd_draw_string((uint16_t)x, 14, pos, LCD_YELLOW, LCD_DKGREY, 1);
+}
 
 /* ── Menu draw functions ───────────────────────────────────────────────────── */
 
@@ -1079,10 +1182,10 @@ static void screen_draw_slot_menu(const pico_bridge_state_t *snap, int cursor)
 	lcd_fill_rect(0, 0, SCREEN_W, SCREEN_H, LCD_BLACK);
 	lcd_fill_rect(0, 0, SCREEN_W, 44, LCD_DKGREY);
 	lcd_draw_string(8, 14, "SELECT SLOT", LCD_CYAN, LCD_DKGREY, 2);
-	lcd_draw_string(332, 14, "HOLD=BACK", LCD_GREY, LCD_DKGREY, 1);
+	screen_draw_slot_position_label(cursor);
 	lcd_draw_hline(0, 44, SCREEN_W, LCD_CYAN);
 
-	for (i = 0; i < PILL_SLOT_COUNT; i++) {
+	for (i = 0; i < UI_VISIBLE_SLOT_COUNT; i++) {
 		uint16_t y = (uint16_t)(46 + i * 54);
 		bool sel = (i == cursor);
 		uint16_t bg = sel ? LCD_CYAN : LCD_BLACK;
@@ -1091,6 +1194,13 @@ static void screen_draw_slot_menu(const pico_bridge_state_t *snap, int cursor)
 		char med[17];
 
 		lcd_fill_rect(0, y, SCREEN_W, 52, bg);
+		if (sel) {
+			lcd_fill_rect(0, y, SCREEN_W, 2, LCD_WHITE);
+			lcd_fill_rect(0, (uint16_t)(y + 50), SCREEN_W, 2, LCD_WHITE);
+			lcd_fill_rect(0, y, 3, 52, LCD_WHITE);
+			lcd_fill_rect((uint16_t)(SCREEN_W - 3), y, 3, 52, LCD_WHITE);
+			lcd_draw_string(2, (uint16_t)(y + 18), ">", fg, bg, 2);
+		}
 		buf[0] = 'S'; buf[1] = (char)('0' + i); buf[2] = '\0';
 		lcd_draw_string(8, (uint16_t)(y + 18), buf, fg, bg, 2);
 
@@ -1108,12 +1218,14 @@ static void screen_draw_slot_menu(const pico_bridge_state_t *snap, int cursor)
 		}
 		lcd_draw_hline(0, (uint16_t)(y + 52), SCREEN_W, LCD_DKGREY);
 	}
+
+	screen_draw_help_bar("UP/DOWN=MOVE   OK=SELECT   HOLD BACK=HOME");
 }
 
 static void screen_draw_action_menu(int slot, int cursor)
 {
 	static const char *const actions[3]   = { "DISPENSE NOW", "EDIT PROFILE", "BACK" };
-	static const uint16_t    act_fg[3]    = { LCD_GREEN, LCD_CYAN, LCD_GREY };
+	static const uint16_t    act_fg[3]    = { LCD_GREEN, LCD_CYAN, LCD_CYAN };
 	char title[20];
 	int i;
 
@@ -1121,7 +1233,7 @@ static void screen_draw_action_menu(int slot, int cursor)
 	lcd_fill_rect(0, 0, SCREEN_W, 44, LCD_DKGREY);
 	snprintf(title, sizeof(title), "SLOT %d", slot);
 	lcd_draw_string(8, 14, title, LCD_YELLOW, LCD_DKGREY, 2);
-	lcd_draw_string(308, 14, "HOLD=BACK", LCD_GREY, LCD_DKGREY, 1);
+	screen_draw_slot_position_label(slot);
 	lcd_draw_hline(0, 44, SCREEN_W, LCD_CYAN);
 
 	for (i = 0; i < 3; i++) {
@@ -1133,14 +1245,107 @@ static void screen_draw_action_menu(int slot, int cursor)
 		lcd_fill_rect(16, y, SCREEN_W - 32, 64, bg);
 		lcd_draw_string(32, (uint16_t)(y + 24), actions[i], fg, bg, 2);
 	}
+
+	screen_draw_help_bar("UP/DOWN=MOVE   OK=SELECT   HOLD BACK=HOME");
+}
+
+static void screen_draw_dispense_confirm(int slot, int cursor)
+{
+	bool yes_sel = (cursor == 0);
+	bool no_sel = (cursor == 1);
+
+	lcd_fill_rect(0, 0, SCREEN_W, SCREEN_H, LCD_BLACK);
+	lcd_fill_rect(0, 0, SCREEN_W, 44, LCD_DKGREY);
+	lcd_draw_string(8, 14, "CONFIRM DISPENSE", LCD_YELLOW, LCD_DKGREY, 2);
+	screen_draw_slot_position_label(slot);
+	lcd_draw_hline(0, 44, SCREEN_W, LCD_CYAN);
+
+	lcd_draw_string(36, 86, "DISPENSE PILLS NOW?", LCD_WHITE, LCD_BLACK, 2);
+
+	lcd_fill_rect(36, 156, 188, 74, yes_sel ? LCD_GREEN : LCD_DKGREY);
+	lcd_draw_string(72, 184, "YES", yes_sel ? LCD_BLACK : LCD_GREEN, yes_sel ? LCD_GREEN : LCD_DKGREY, 2);
+
+	lcd_fill_rect(256, 156, 188, 74, no_sel ? LCD_RED : LCD_DKGREY);
+	lcd_draw_string(308, 184, "NO", no_sel ? LCD_BLACK : LCD_RED, no_sel ? LCD_RED : LCD_DKGREY, 2);
+
+	screen_draw_help_bar("UP/DOWN=CHOOSE   OK=CONFIRM   HOLD BACK=HOME");
+}
+
+static void screen_draw_feedback_card(const char *title, const char *message, uint16_t accent)
+{
+	lcd_fill_rect(0, 0, SCREEN_W, SCREEN_H, LCD_BLACK);
+	lcd_fill_rect(0, 0, SCREEN_W, 44, LCD_DKGREY);
+	lcd_draw_string(8, 14, title, accent, LCD_DKGREY, 2);
+	lcd_draw_hline(0, 44, SCREEN_W, accent);
+
+	lcd_fill_rect(40, 94, SCREEN_W - 80, 132, LCD_DKGREY);
+	lcd_fill_rect(40, 94, SCREEN_W - 80, 4, accent);
+	lcd_fill_rect(40, 222, SCREEN_W - 80, 4, accent);
+	lcd_draw_string(84, 146, message, LCD_WHITE, LCD_DKGREY, 2);
+
+	screen_draw_help_bar("PLEASE WAIT...");
+}
+
+static void screen_draw_dispense_waiting(void)
+{
+	lcd_fill_rect(0, 0, SCREEN_W, SCREEN_H, LCD_BLACK);
+	lcd_fill_rect(0, 0, SCREEN_W, 44, LCD_DKGREY);
+	lcd_draw_string(8, 14, "DISPENSE", LCD_CYAN, LCD_DKGREY, 2);
+	lcd_draw_hline(0, 44, SCREEN_W, LCD_CYAN);
+
+	lcd_fill_rect(40, 94, SCREEN_W - 80, 132, LCD_DKGREY);
+	lcd_fill_rect(40, 94, SCREEN_W - 80, 4, LCD_CYAN);
+	lcd_fill_rect(40, 222, SCREEN_W - 80, 4, LCD_CYAN);
+	lcd_draw_string(84, 136, "DISPENSING PILLS...", LCD_WHITE, LCD_DKGREY, 2);
+	lcd_draw_string(76, 178, "WAITING FOR CONTROLLER", LCD_YELLOW, LCD_DKGREY, 1);
+
+	screen_draw_help_bar("WAITING FOR RESULT...");
+}
+
+static void screen_draw_dispense_success_wait(void)
+{
+	lcd_fill_rect(0, 0, SCREEN_W, SCREEN_H, LCD_BLACK);
+	lcd_fill_rect(0, 0, SCREEN_W, 44, LCD_DKGREY);
+	lcd_draw_string(8, 14, "DISPENSE", LCD_CYAN, LCD_DKGREY, 2);
+	lcd_draw_hline(0, 44, SCREEN_W, LCD_CYAN);
+
+	lcd_fill_rect(40, 94, SCREEN_W - 80, 132, LCD_DKGREY);
+	lcd_fill_rect(40, 94, SCREEN_W - 80, 4, LCD_CYAN);
+	lcd_fill_rect(40, 222, SCREEN_W - 80, 4, LCD_CYAN);
+	lcd_draw_string(66, 130, "PILLS DISPENSED", LCD_CYAN, LCD_DKGREY, 2);
+	lcd_draw_string(66, 164, "OPEN TRAY :)", LCD_WHITE, LCD_DKGREY, 2);
+	lcd_draw_string(66, 198, "OR PRESS OK TO CONTINUE", LCD_YELLOW, LCD_DKGREY, 1);
+
+	screen_draw_help_bar("OPEN TRAY OR PRESS OK");
+}
+
+static void screen_draw_dispense_failure_wait(int slot)
+{
+	char msg[48];
+
+	lcd_fill_rect(0, 0, SCREEN_W, SCREEN_H, LCD_BLACK);
+	lcd_fill_rect(0, 0, SCREEN_W, 44, LCD_DKGREY);
+	lcd_draw_string(8, 14, "DISPENSE", LCD_CYAN, LCD_DKGREY, 2);
+	lcd_draw_hline(0, 44, SCREEN_W, LCD_CYAN);
+
+	lcd_fill_rect(40, 94, SCREEN_W - 80, 132, LCD_DKGREY);
+	lcd_fill_rect(40, 94, SCREEN_W - 80, 4, LCD_CYAN);
+	lcd_fill_rect(40, 222, SCREEN_W - 80, 4, LCD_CYAN);
+	lcd_draw_string(52, 126, "PILLS FAILED", LCD_CYAN, LCD_DKGREY, 2);
+	snprintf(msg, sizeof(msg), "CHECK FOR JAM ON SLOT %d", slot + 1);
+	lcd_draw_string(52, 160, msg, LCD_WHITE, LCD_DKGREY, 2);
+	lcd_draw_string(52, 194, "PRESS OK TO CONTINUE", LCD_YELLOW, LCD_DKGREY, 2);
+
+	screen_draw_help_bar("PRESS OK TO CONTINUE");
 }
 
 static void screen_draw_edit(const ui_state_t *st)
 {
 	static const char *const field_labels[EDIT_FIELD_COUNT] = {
-		"TOTAL PILLS", "DOSE PER DISPENSE", "SCHEDULE", "CONFIRM?",
+		"PILLS IN SLOT", "PILLS EACH DOSE", "DAILY TIME", "SAVE CHANGES",
 	};
 	char val[24];
+	char hint[42];
 	char title[20];
 	int i;
 
@@ -1148,6 +1353,7 @@ static void screen_draw_edit(const ui_state_t *st)
 	lcd_fill_rect(0, 0, SCREEN_W, 44, LCD_DKGREY);
 	snprintf(title, sizeof(title), "EDIT SLOT %d", st->edit_slot);
 	lcd_draw_string(8, 14, title, LCD_YELLOW, LCD_DKGREY, 2);
+	screen_draw_slot_position_label(st->edit_slot);
 	lcd_draw_hline(0, 44, SCREEN_W, LCD_CYAN);
 
 	for (i = 0; i < EDIT_FIELD_COUNT; i++) {
@@ -1163,7 +1369,7 @@ static void screen_draw_edit(const ui_state_t *st)
 		} else if (i == 2) {
 			snprintf(val, sizeof(val), "%s", schedule_labels[st->edit_sched_idx]);
 		} else {
-			snprintf(val, sizeof(val), "PRESS SELECT");
+			snprintf(val, sizeof(val), "PRESS OK");
 		}
 
 		lcd_draw_string(8, (uint16_t)(y + 10), val, sel ? LCD_WHITE : LCD_GREY, LCD_BLACK, 2);
@@ -1172,19 +1378,38 @@ static void screen_draw_edit(const ui_state_t *st)
 		}
 	}
 
-	lcd_draw_string(8, 305, "UP/DN=CHANGE  SEL=NEXT  HOLD=CANCEL", LCD_GREY, LCD_BLACK, 1);
+	if (st->cursor == 0) {
+		snprintf(hint, sizeof(hint), "SET TOTAL PILLS IN THIS SLOT");
+	} else if (st->cursor == 1) {
+		snprintf(hint, sizeof(hint), "SET PILLS TAKEN EACH TIME");
+	} else if (st->cursor == 2) {
+		snprintf(hint, sizeof(hint), "CHOOSE THE DAILY TIME PLAN");
+	} else {
+		snprintf(hint, sizeof(hint), "PRESS OK TO SAVE PROFILE");
+	}
+	lcd_draw_string(8, 288, hint, LCD_GREY, LCD_BLACK, 1);
+
+	screen_draw_help_bar("UP MORE  DOWN LESS  OK NEXT  HOLD BACK");
 }
 
 /* ── Button polling task ───────────────────────────────────────────────────── */
 
 static void button_task(void *arg)
 {
+	bool prev_left = true;
+	bool prev_right = true;
 	bool prev_up  = true;
 	bool prev_dn  = true;
 	bool prev_sel = true;
 	TickType_t sel_press_tick = 0;
+	TickType_t last_left_evt_tick = 0;
+	TickType_t last_right_evt_tick = 0;
+	TickType_t last_up_evt_tick = 0;
+	TickType_t last_dn_evt_tick = 0;
+	TickType_t last_sel_evt_tick = 0;
 	gpio_config_t cfg = {
-		.pin_bit_mask = (1ULL << BTN_UP_PIN) | (1ULL << BTN_DOWN_PIN) | (1ULL << BTN_SEL_PIN),
+		.pin_bit_mask = (1ULL << BTN_LEFT_PIN) | (1ULL << BTN_RIGHT_PIN) |
+				(1ULL << BTN_UP_PIN) | (1ULL << BTN_DOWN_PIN) | (1ULL << BTN_OK_PIN),
 		.mode         = GPIO_MODE_INPUT,
 		.pull_up_en   = GPIO_PULLUP_ENABLE,
 		.pull_down_en = GPIO_PULLDOWN_DISABLE,
@@ -1195,33 +1420,58 @@ static void button_task(void *arg)
 	gpio_config(&cfg);
 
 	while (1) {
+		TickType_t now_tick = xTaskGetTickCount();
+		bool cur_left  = gpio_get_level(BTN_LEFT_PIN) != 0;
+		bool cur_right = gpio_get_level(BTN_RIGHT_PIN) != 0;
 		bool cur_up  = gpio_get_level(BTN_UP_PIN)  != 0;
 		bool cur_dn  = gpio_get_level(BTN_DOWN_PIN) != 0;
-		bool cur_sel = gpio_get_level(BTN_SEL_PIN)  != 0;
+		bool cur_sel = gpio_get_level(BTN_OK_PIN)  != 0;
 
-		if (!cur_up && prev_up) {
+		if (!cur_left && prev_left &&
+		    (now_tick - last_left_evt_tick) >= pdMS_TO_TICKS(BTN_DEBOUNCE_MS)) {
+			ESP_LOGI(TAG, "BTN: LEFT pressed (BACK)");
+			btn_event_t e = BTN_EVT_BACK;
+			xQueueSend(btn_queue, &e, 0);
+			last_left_evt_tick = now_tick;
+		}
+		if (!cur_right && prev_right &&
+		    (now_tick - last_right_evt_tick) >= pdMS_TO_TICKS(BTN_DEBOUNCE_MS)) {
+			ESP_LOGI(TAG, "BTN: RIGHT pressed (SELECT)");
+			btn_event_t e = BTN_EVT_SELECT;
+			xQueueSend(btn_queue, &e, 0);
+			last_right_evt_tick = now_tick;
+		}
+		if (!cur_up && prev_up &&
+		    (now_tick - last_up_evt_tick) >= pdMS_TO_TICKS(BTN_DEBOUNCE_MS)) {
 			ESP_LOGI(TAG, "BTN: UP pressed");
 			btn_event_t e = BTN_EVT_UP;
 			xQueueSend(btn_queue, &e, 0);
+			last_up_evt_tick = now_tick;
 		}
-		if (!cur_dn && prev_dn) {
+		if (!cur_dn && prev_dn &&
+		    (now_tick - last_dn_evt_tick) >= pdMS_TO_TICKS(BTN_DOWN_DEBOUNCE_MS)) {
 			ESP_LOGI(TAG, "BTN: DOWN pressed");
 			btn_event_t e = BTN_EVT_DOWN;
 			xQueueSend(btn_queue, &e, 0);
+			last_dn_evt_tick = now_tick;
 		}
 		if (!cur_sel && prev_sel) {
 			sel_press_tick = xTaskGetTickCount();
 		}
-		if (cur_sel && !prev_sel) {
+		if (cur_sel && !prev_sel &&
+		    (now_tick - last_sel_evt_tick) >= pdMS_TO_TICKS(BTN_DEBOUNCE_MS)) {
 			TickType_t held = xTaskGetTickCount() - sel_press_tick;
 			btn_event_t e = (held >= pdMS_TO_TICKS(BTN_LONG_MS)) ? BTN_EVT_BACK : BTN_EVT_SELECT;
 			if (e == BTN_EVT_BACK)
-				ESP_LOGI(TAG, "BTN: SEL long-press (BACK)");
+				ESP_LOGI(TAG, "BTN: OK long-press (BACK)");
 			else
-				ESP_LOGI(TAG, "BTN: SEL short-press (SELECT)");
+				ESP_LOGI(TAG, "BTN: OK short-press (SELECT)");
 			xQueueSend(btn_queue, &e, 0);
+			last_sel_evt_tick = now_tick;
 		}
 
+		prev_left = cur_left;
+		prev_right = cur_right;
 		prev_up  = cur_up;
 		prev_dn  = cur_dn;
 		prev_sel = cur_sel;
@@ -1229,10 +1479,58 @@ static void button_task(void *arg)
 	}
 }
 
+static void hall_signal_task(void *arg)
+{
+	int prev_level;
+
+	(void)arg;
+	prev_level = gpio_get_level(HALL_SIGNAL_PIN);
+
+	while (1) {
+		int level = gpio_get_level(HALL_SIGNAL_PIN);
+		if (level != prev_level) {
+			prev_level = level;
+			if (level == HALL_TRIGGER_LEVEL) {
+				ESP_LOGI(TAG, "HALL: triggered on GPIO%d", HALL_SIGNAL_PIN);
+				if (bridge_state_mutex != NULL &&
+				    xSemaphoreTake(bridge_state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+					if (bridge_state.awaiting_drawer_open) {
+						bridge_mark_dispense_taken_locked(&bridge_state, bridge_state.drawer_open_slot);
+					} else {
+						ESP_LOGI(TAG, "HALL: drawer opened with no pending dispense pickup");
+					}
+					xSemaphoreGive(bridge_state_mutex);
+				}
+			}
+		}
+
+		vTaskDelay(pdMS_TO_TICKS(HALL_POLL_MS));
+	}
+}
+
+static void start_hall_signal_input(void)
+{
+	gpio_config_t cfg = {
+		.pin_bit_mask = (1ULL << HALL_SIGNAL_PIN),
+		.mode = GPIO_MODE_INPUT,
+		.pull_up_en = GPIO_PULLUP_ENABLE,
+		.pull_down_en = GPIO_PULLDOWN_DISABLE,
+		.intr_type = GPIO_INTR_DISABLE,
+	};
+
+	ESP_ERROR_CHECK(gpio_config(&cfg));
+	xTaskCreate(hall_signal_task, "hall_signal", 2048, NULL, 2, NULL);
+	ESP_LOGI(TAG, "Hall signal input ready on GPIO%d (trigger level=%d)",
+		 HALL_SIGNAL_PIN,
+		 HALL_TRIGGER_LEVEL);
+}
+
 static void screen_task(void *arg)
 {
 	pico_bridge_state_t *snapshot;
 	TickType_t last_input_tick;
+	ui_screen_t last_drawn_screen = (ui_screen_t)(-1);
+	int last_drawn_failure_slot = -1;
 
 	(void)arg;
 
@@ -1245,8 +1543,11 @@ static void screen_task(void *arg)
 
 	ui_state.screen = UI_STATUS;
 	ui_state.cursor = 0;
+	ui_state.dispense_slot = -1;
+	ui_state.feedback_deadline_tick = 0;
 	last_input_tick = xTaskGetTickCount();
 	lcd_fill_rect(0, 0, SCREEN_W, SCREEN_H, LCD_BLACK);
+	memset(snapshot, 0, sizeof(*snapshot));
 
 	while (1) {
 		TickType_t wait = (ui_state.screen == UI_STATUS)
@@ -1261,19 +1562,24 @@ static void screen_task(void *arg)
 			case UI_STATUS:
 				ui_state.screen = UI_SLOT_MENU;
 				ui_state.cursor = 0;
+				led_enqueue_event(LED_EVENT_SLOT_SELECT, ui_state.cursor);
 				break;
 
 			case UI_SLOT_MENU:
 				if (evt == BTN_EVT_UP) {
-					ui_state.cursor = (ui_state.cursor + PILL_SLOT_COUNT - 1) % PILL_SLOT_COUNT;
+					ui_state.cursor = (ui_state.cursor + UI_VISIBLE_SLOT_COUNT - 1) % UI_VISIBLE_SLOT_COUNT;
+					led_enqueue_event(LED_EVENT_SLOT_SELECT, ui_state.cursor);
 				} else if (evt == BTN_EVT_DOWN) {
-					ui_state.cursor = (ui_state.cursor + 1) % PILL_SLOT_COUNT;
+					ui_state.cursor = (ui_state.cursor + 1) % UI_VISIBLE_SLOT_COUNT;
+					led_enqueue_event(LED_EVENT_SLOT_SELECT, ui_state.cursor);
 				} else if (evt == BTN_EVT_BACK) {
 					ui_state.screen = UI_STATUS;
+					led_enqueue_event(LED_EVENT_SLOT_CLEAR, -1);
 				} else if (evt == BTN_EVT_SELECT) {
 					ui_state.edit_slot = ui_state.cursor;
 					ui_state.cursor    = 0;
 					ui_state.screen    = UI_ACTION_MENU;
+					led_enqueue_event(LED_EVENT_SLOT_SELECT, ui_state.edit_slot);
 				}
 				break;
 
@@ -1285,23 +1591,11 @@ static void screen_task(void *arg)
 				} else if (evt == BTN_EVT_BACK) {
 					ui_state.screen = UI_SLOT_MENU;
 					ui_state.cursor = ui_state.edit_slot;
+					led_enqueue_event(LED_EVENT_SLOT_SELECT, ui_state.cursor);
 				} else if (evt == BTN_EVT_SELECT) {
 					if (ui_state.cursor == 0) {
-						/* Dispense Now */
-						if (xSemaphoreTake(bridge_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
-							bridge_send_dispense_for_slot(ui_state.edit_slot);
-							bridge_state.active_profile_slot    = ui_state.edit_slot;
-							bridge_state.awaiting_dispense_ack  = true;
-							bridge_state.dispense_ack_deadline_us =
-								esp_timer_get_time() + DISPENSE_ACK_TIMEOUT_US;
-							bridge_copy_string(bridge_state.last_ack_action,
-							                   sizeof(bridge_state.last_ack_action), "DISPENSE");
-							bridge_copy_string(bridge_state.last_ack_result,
-							                   sizeof(bridge_state.last_ack_result), "pending");
-							bridge_state_save_to_nvs(&bridge_state);
-							xSemaphoreGive(bridge_state_mutex);
-						}
-						ui_state.screen = UI_STATUS;
+						ui_state.screen = UI_CONFIRM_DISPENSE;
+						ui_state.cursor = 0;
 					} else if (ui_state.cursor == 1) {
 						/* Edit Profile — seed edit buffer from current slot */
 						if (xSemaphoreTake(bridge_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -1321,12 +1615,70 @@ static void screen_task(void *arg)
 						ui_state.cursor = 0;
 						ui_state.screen = UI_EDIT_FIELD;
 						audio_enqueue_event(AUDIO_EVENT_EDIT_BEGIN);
+						led_enqueue_event(LED_EVENT_SLOT_CLEAR, -1);
 						led_enqueue_event(LED_EVENT_EDIT_BEGIN, ui_state.edit_slot);
 					} else {
 						/* Back */
 						ui_state.screen = UI_SLOT_MENU;
 						ui_state.cursor = ui_state.edit_slot;
+						led_enqueue_event(LED_EVENT_SLOT_SELECT, ui_state.cursor);
 					}
+				}
+				break;
+
+			case UI_CONFIRM_DISPENSE:
+				if (evt == BTN_EVT_UP || evt == BTN_EVT_DOWN) {
+					ui_state.cursor = (ui_state.cursor == 0) ? 1 : 0;
+				} else if (evt == BTN_EVT_BACK) {
+					ui_state.screen = UI_ACTION_MENU;
+					ui_state.cursor = 0;
+				} else if (evt == BTN_EVT_SELECT) {
+					if (ui_state.cursor == 0) {
+						/* Yes -> Dispense now */
+						if (xSemaphoreTake(bridge_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+							bridge_send_dispense_for_slot(ui_state.edit_slot);
+							bridge_state.active_profile_slot    = ui_state.edit_slot;
+							bridge_state.awaiting_dispense_ack  = true;
+							bridge_state.dispense_ack_deadline_us =
+								esp_timer_get_time() + DISPENSE_ACK_TIMEOUT_US;
+							bridge_copy_string(bridge_state.last_ack_action,
+							                   sizeof(bridge_state.last_ack_action), "DISPENSE");
+							bridge_copy_string(bridge_state.last_ack_result,
+							                   sizeof(bridge_state.last_ack_result), "pending");
+							bridge_state_save_to_nvs(&bridge_state);
+							xSemaphoreGive(bridge_state_mutex);
+						}
+						ui_state.screen = UI_NOTICE_DISPENSING;
+						ui_state.dispense_slot = ui_state.edit_slot;
+						ui_state.feedback_deadline_tick = 0;
+						led_enqueue_event(LED_EVENT_SLOT_SELECT, ui_state.edit_slot);
+					} else {
+						/* No -> back to action menu */
+						ui_state.screen = UI_ACTION_MENU;
+						ui_state.cursor = 0;
+					}
+				}
+				break;
+
+			case UI_NOTICE_DISPENSING:
+				/* Wait screen is driven by ACK status updates. */
+				break;
+
+			case UI_NOTICE_DISPENSE_SUCCESS:
+				if (evt == BTN_EVT_SELECT) {
+					led_enqueue_event(LED_EVENT_SLOT_CLEAR, -1);
+					ui_state.screen = UI_STATUS;
+					ui_state.cursor = 0;
+					ui_state.dispense_slot = -1;
+				}
+				break;
+
+			case UI_NOTICE_DISPENSE_FAILURE:
+				if (evt == BTN_EVT_SELECT) {
+					led_enqueue_event(LED_EVENT_SLOT_CLEAR, -1);
+					ui_state.screen = UI_STATUS;
+					ui_state.cursor = 0;
+					ui_state.dispense_slot = -1;
 				}
 				break;
 
@@ -1363,7 +1715,9 @@ static void screen_task(void *arg)
 							xSemaphoreGive(bridge_state_mutex);
 						}
 						led_enqueue_event(LED_EVENT_EDIT_END, ui_state.edit_slot);
-						ui_state.screen = UI_STATUS;
+						ui_state.screen = UI_NOTICE_SAVED;
+						ui_state.feedback_deadline_tick =
+							xTaskGetTickCount() + pdMS_TO_TICKS(UI_SAVE_FEEDBACK_MS);
 					}
 					break;
 				}
@@ -1392,12 +1746,24 @@ static void screen_task(void *arg)
 			}
 		}
 
+		if (ui_state.screen == UI_NOTICE_SAVED &&
+		    ui_state.feedback_deadline_tick != 0 &&
+		    xTaskGetTickCount() >= ui_state.feedback_deadline_tick) {
+			ui_state.screen = UI_STATUS;
+			ui_state.cursor = 0;
+			ui_state.feedback_deadline_tick = 0;
+		}
+
 		/* Redraw: always on button event; also on 2s timeout in status mode */
-		if (!got_event && ui_state.screen != UI_STATUS) {
+		if (!got_event && ui_state.screen != UI_STATUS &&
+		    ui_state.screen != UI_NOTICE_DISPENSING &&
+		    ui_state.screen != UI_NOTICE_DISPENSE_SUCCESS &&
+		    ui_state.screen != UI_NOTICE_DISPENSE_FAILURE) {
 			if ((xTaskGetTickCount() - last_input_tick) >= pdMS_TO_TICKS(UI_INACTIVITY_TIMEOUT_MS)) {
 				if (ui_state.screen == UI_EDIT_FIELD) {
 					led_enqueue_event(LED_EVENT_EDIT_END, ui_state.edit_slot);
 				}
+				led_enqueue_event(LED_EVENT_SLOT_CLEAR, -1);
 				ui_state.screen = UI_STATUS;
 				ui_state.cursor = 0;
 			} else {
@@ -1405,11 +1771,59 @@ static void screen_task(void *arg)
 			}
 		}
 
-		memset(snapshot, 0, sizeof(*snapshot));
 		if (bridge_state_mutex != NULL &&
 		    xSemaphoreTake(bridge_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
 			*snapshot = bridge_state;
 			xSemaphoreGive(bridge_state_mutex);
+		}
+
+		if (ui_state.screen == UI_NOTICE_DISPENSING) {
+			int dslot = ui_state.dispense_slot;
+			bool slot_valid = (dslot >= 0 && dslot < PILL_SLOT_COUNT);
+			const char *slot_result = slot_valid ? snapshot->slots[dslot].last_dispense_result : "";
+
+			if (snapshot->awaiting_dispense_ack) {
+				/* Keep waiting while ACK is pending. */
+			} else if (snapshot->awaiting_drawer_open &&
+			           ((snapshot->drawer_open_slot == dslot) ||
+			            strcmp(snapshot->last_ack_result, "ok") == 0)) {
+				ui_state.screen = UI_NOTICE_DISPENSE_SUCCESS;
+				audio_enqueue_event(AUDIO_EVENT_SUCCESS);
+				led_enqueue_event(LED_EVENT_SUCCESS, slot_valid ? dslot : snapshot->active_profile_slot);
+			} else if ((strcmp(snapshot->last_ack_action, "DISPENSE") == 0) &&
+			           (strcmp(snapshot->last_ack_result, "fail") == 0 ||
+			            strcmp(snapshot->last_ack_result, "timeout") == 0)) {
+				ui_state.screen = UI_NOTICE_DISPENSE_FAILURE;
+			} else if (slot_valid &&
+			           (strcmp(slot_result, "fail") == 0 || strcmp(slot_result, "timeout") == 0)) {
+				ui_state.screen = UI_NOTICE_DISPENSE_FAILURE;
+			} else if (slot_valid && strcmp(slot_result, "ok") == 0) {
+				/* Dispense finished very quickly and slot already reported success. */
+				ui_state.screen = UI_NOTICE_DISPENSE_SUCCESS;
+				audio_enqueue_event(AUDIO_EVENT_SUCCESS);
+				led_enqueue_event(LED_EVENT_SUCCESS, dslot);
+			} else if (strcmp(snapshot->last_ack_result, "fail") == 0 ||
+			           strcmp(snapshot->last_ack_result, "timeout") == 0) {
+				ui_state.screen = UI_NOTICE_DISPENSE_FAILURE;
+			} else {
+				/* No terminal result yet; stay on wait screen instead of jumping to menu. */
+			}
+		} else if (ui_state.screen == UI_NOTICE_DISPENSE_SUCCESS) {
+			if (!snapshot->awaiting_drawer_open) {
+				led_enqueue_event(LED_EVENT_SLOT_CLEAR, -1);
+				ui_state.screen = UI_STATUS;
+				ui_state.dispense_slot = -1;
+			}
+		}
+
+		if (!got_event &&
+		    (ui_state.screen == UI_NOTICE_DISPENSING ||
+		     ui_state.screen == UI_NOTICE_DISPENSE_SUCCESS ||
+		     ui_state.screen == UI_NOTICE_DISPENSE_FAILURE) &&
+		    ui_state.screen == last_drawn_screen &&
+		    (ui_state.screen != UI_NOTICE_DISPENSE_FAILURE ||
+		     snapshot->active_profile_slot == last_drawn_failure_slot)) {
+			continue;
 		}
 
 		if (ui_state.screen == UI_STATUS) {
@@ -1418,8 +1832,23 @@ static void screen_task(void *arg)
 			screen_draw_slot_menu(snapshot, ui_state.cursor);
 		} else if (ui_state.screen == UI_ACTION_MENU) {
 			screen_draw_action_menu(ui_state.edit_slot, ui_state.cursor);
+		} else if (ui_state.screen == UI_CONFIRM_DISPENSE) {
+			screen_draw_dispense_confirm(ui_state.edit_slot, ui_state.cursor);
 		} else if (ui_state.screen == UI_EDIT_FIELD) {
 			screen_draw_edit(&ui_state);
+		} else if (ui_state.screen == UI_NOTICE_DISPENSING) {
+			screen_draw_dispense_waiting();
+		} else if (ui_state.screen == UI_NOTICE_DISPENSE_SUCCESS) {
+			screen_draw_dispense_success_wait();
+		} else if (ui_state.screen == UI_NOTICE_DISPENSE_FAILURE) {
+			screen_draw_dispense_failure_wait(snapshot->active_profile_slot);
+		} else if (ui_state.screen == UI_NOTICE_SAVED) {
+			screen_draw_feedback_card("PROFILE", "PILLS SAVED :)", LCD_CYAN);
+		}
+
+		last_drawn_screen = ui_state.screen;
+		if (ui_state.screen == UI_NOTICE_DISPENSE_FAILURE) {
+			last_drawn_failure_slot = snapshot->active_profile_slot;
 		}
 	}
 
@@ -1494,6 +1923,8 @@ static void bridge_state_reset_defaults(pico_bridge_state_t *state)
 	strcpy(state->last_ack_action, "none");
 	strcpy(state->last_ack_result, "none");
 	state->awaiting_dispense_ack = false;
+	state->awaiting_drawer_open = false;
+	state->drawer_open_slot = -1;
 	state->dispense_ack_deadline_us = 0;
 	state->last_update_us = 0;
 }
@@ -1619,6 +2050,58 @@ static void bridge_log_status_locked(pico_bridge_state_t *state, const pill_slot
 				 slot_state->last_event);
 }
 
+static void bridge_mark_dispense_taken_locked(pico_bridge_state_t *state, int slot_number)
+{
+	pill_slot_state_t *slot_state;
+	time_t now;
+	struct tm timeinfo;
+	char time_buf[64];
+
+	if (state == NULL) {
+		return;
+	}
+
+	if (bridge_slot_index_from_number(slot_number) < 0) {
+		slot_number = state->active_profile_slot;
+	}
+
+	if (bridge_slot_index_from_number(slot_number) < 0) {
+		return;
+	}
+
+	slot_state = &state->slots[slot_number];
+	now = time(NULL);
+	if (localtime_r(&now, &timeinfo) != NULL &&
+	    strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &timeinfo) > 0) {
+		bridge_copy_string(slot_state->last_dispensed, sizeof(slot_state->last_dispensed), time_buf);
+	} else {
+		bridge_copy_string(slot_state->last_dispensed,
+				 sizeof(slot_state->last_dispensed),
+				 "Drawer opened (time unavailable)");
+	}
+
+	bridge_copy_string(slot_state->last_dispense_result,
+				 sizeof(slot_state->last_dispense_result),
+				 "ok");
+	bridge_copy_string(slot_state->last_event,
+				 sizeof(slot_state->last_event),
+				 "Drawer opened after dispense. Pills taken.");
+	bridge_copy_string(slot_state->notes,
+				 sizeof(slot_state->notes),
+				 "Hall sensor confirmed drawer open after dispense.");
+
+	state->active_profile_slot = slot_number;
+	state->awaiting_drawer_open = false;
+	state->drawer_open_slot = -1;
+
+	bridge_log_status_locked(state, slot_state);
+	bridge_state_save_to_nvs(state);
+	audio_enqueue_event(AUDIO_EVENT_SUCCESS);
+	led_enqueue_event(LED_EVENT_SUCCESS, slot_number);
+
+	ESP_LOGI(TAG, "Dispense confirmed as taken for slot %d by hall trigger", slot_number);
+}
+
 static void uart_bridge_send_line(const char *line)
 {
 	if (line == NULL) {
@@ -1686,16 +2169,27 @@ static void bridge_send_dispense_for_slot(int slot_number)
 
 static void bridge_start_dispense_locked(pico_bridge_state_t *state, int slot_number)
 {
+	pill_slot_state_t *slot_state;
+
 	if (state == NULL || bridge_slot_index_from_number(slot_number) < 0) {
 		return;
 	}
 
 	bridge_send_dispense_for_slot(slot_number);
+	slot_state = &state->slots[slot_number];
 	state->active_profile_slot = slot_number;
 	state->awaiting_dispense_ack = true;
+	state->awaiting_drawer_open = false;
+	state->drawer_open_slot = -1;
 	state->dispense_ack_deadline_us = esp_timer_get_time() + DISPENSE_ACK_TIMEOUT_US;
 	bridge_copy_string(state->last_ack_action, sizeof(state->last_ack_action), "DISPENSE");
 	bridge_copy_string(state->last_ack_result, sizeof(state->last_ack_result), "pending");
+	bridge_copy_string(slot_state->last_dispense_result,
+				 sizeof(slot_state->last_dispense_result),
+				 "pending");
+	bridge_copy_string(slot_state->last_event,
+				 sizeof(slot_state->last_event),
+				 "Dispense command sent. Waiting for ACK.");
 }
 
 static bool bridge_enqueue_dispense_slot_locked(pico_bridge_state_t *state, int slot_number)
@@ -1810,6 +2304,7 @@ static void bridge_handle_ack_line(pico_bridge_state_t *state, const char *line)
 	char *saveptr = NULL;
 	char *token;
 	int ack_slot = -1;
+	int dispense_slot = -1;
 	char action[32] = "unknown";
 	char result[32] = "unknown";
 
@@ -1835,12 +2330,29 @@ static void bridge_handle_ack_line(pico_bridge_state_t *state, const char *line)
 	bridge_copy_string(state->last_ack_action, sizeof(state->last_ack_action), action);
 	bridge_copy_string(state->last_ack_result, sizeof(state->last_ack_result), result);
 	if (strcmp(action, "DISPENSE") == 0) {
+		dispense_slot = bridge_slot_index_from_number(ack_slot) >= 0 ? ack_slot : state->active_profile_slot;
+		if (bridge_slot_index_from_number(dispense_slot) < 0) {
+			dispense_slot = 0;
+		}
 		state->awaiting_dispense_ack = false;
 		state->dispense_ack_deadline_us = 0;
 		if (strcmp(result, "ok") == 0) {
-			audio_enqueue_event(AUDIO_EVENT_SUCCESS);
-			led_enqueue_event(LED_EVENT_SUCCESS, ack_slot);
+			pill_slot_state_t *slot_state = &state->slots[dispense_slot];
+			state->awaiting_drawer_open = true;
+			state->drawer_open_slot = dispense_slot;
+			state->active_profile_slot = dispense_slot;
+			bridge_copy_string(slot_state->last_dispense_result,
+					 sizeof(slot_state->last_dispense_result),
+					 "pending");
+			bridge_copy_string(slot_state->last_event,
+					 sizeof(slot_state->last_event),
+					 "Dispensed. Waiting for drawer-open confirmation.");
+			ESP_LOGI(TAG,
+				 "Dispense for slot %d acknowledged. Waiting for hall trigger to mark taken.",
+				 dispense_slot);
 		} else if (strcmp(result, "fail") == 0 || strcmp(result, "timeout") == 0) {
+			state->awaiting_drawer_open = false;
+			state->drawer_open_slot = -1;
 			audio_enqueue_event(AUDIO_EVENT_FAILURE);
 			led_enqueue_event(LED_EVENT_FAILURE, ack_slot);
 		}
@@ -1946,6 +2458,8 @@ static void bridge_update_connected_flag_locked(void)
 		esp_timer_get_time() > bridge_state.dispense_ack_deadline_us) {
 		pill_slot_state_t *timed_out_slot = &bridge_state.slots[bridge_state.active_profile_slot];
 		bridge_state.awaiting_dispense_ack = false;
+		bridge_state.awaiting_drawer_open = false;
+		bridge_state.drawer_open_slot = -1;
 		bridge_state.dispense_ack_deadline_us = 0;
 		bridge_copy_string(bridge_state.last_ack_result,
 				   sizeof(bridge_state.last_ack_result),
@@ -1994,7 +2508,15 @@ static void bridge_apply_field(pico_bridge_state_t *state, pill_slot_state_t *sl
 	} else if (strcmp(key, "notes") == 0) {
 		bridge_copy_string(slot_state->notes, sizeof(slot_state->notes), value);
 	} else if (strcmp(key, "result") == 0) {
-		bridge_copy_string(slot_state->last_dispense_result, sizeof(slot_state->last_dispense_result), value);
+		if (state->awaiting_drawer_open &&
+		    state->drawer_open_slot == slot_state->slot_number &&
+		    strcmp(value, "ok") == 0) {
+			bridge_copy_string(slot_state->last_dispense_result,
+					 sizeof(slot_state->last_dispense_result),
+					 "pending");
+		} else {
+			bridge_copy_string(slot_state->last_dispense_result, sizeof(slot_state->last_dispense_result), value);
+		}
 	} else if (strcmp(key, "schedule") == 0) {
 		bridge_copy_string(slot_state->schedule, sizeof(slot_state->schedule), value);
 	}
@@ -2037,6 +2559,14 @@ static void bridge_handle_status_line(pico_bridge_state_t *state, const char *li
 	}
 
 	slot_state->has_data = true;
+	if (state->awaiting_drawer_open && state->drawer_open_slot == slot_number) {
+		bridge_copy_string(slot_state->last_dispense_result,
+				 sizeof(slot_state->last_dispense_result),
+				 "pending");
+		bridge_copy_string(slot_state->last_event,
+				 sizeof(slot_state->last_event),
+				 "Dispensed. Waiting for drawer-open confirmation.");
+	}
 	state->last_update_us = esp_timer_get_time();
 	state->connected = true;
 	bridge_copy_string(state->controller_transport,
@@ -2239,6 +2769,8 @@ static void start_uart_bridge(void)
 		/* Dispense-ack state is transient — never restore it across reboots.
 		 * The old deadline_us would be stale and the timeout would never fire. */
 		bridge_state.awaiting_dispense_ack = false;
+		bridge_state.awaiting_drawer_open = false;
+		bridge_state.drawer_open_slot = -1;
 		bridge_state.dispense_ack_deadline_us = 0;
 		bridge_copy_string(bridge_state.controller_transport,
 					   sizeof(bridge_state.controller_transport),
@@ -2797,29 +3329,31 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 	snprintf(response,
 			 STATUS_RESPONSE_BUFFER_SIZE,
 			 "{"
-			 "\"device_time\":\"%s\","
+			 "\"device_time\":\"%s\"," 
 			 "\"bridge_connected\":%s,"
-			 "\"bridge_status\":\"waiting_for_pico\","
-			 "\"controller_name\":\"Raspberry Pi Pico 2\","
-			 "\"controller_transport\":\"%s\","
+			 "\"bridge_status\":\"waiting_for_pico\"," 
+			 "\"controller_name\":\"Raspberry Pi Pico 2\"," 
+			 "\"controller_transport\":\"%s\"," 
 			 "\"active_profile_slot\":%d,"
 			 "\"slot_count\":%d,"
 			 "\"history_count\":%d,"
-			 "\"last_ack_action\":\"%s\","
-			 "\"last_ack_result\":\"%s\","
+			 "\"last_ack_action\":\"%s\"," 
+			 "\"last_ack_result\":\"%s\"," 
 			 "\"awaiting_dispense_ack\":%s,"
-			 "\"medication_name\":\"%s\","
+			 "\"awaiting_drawer_open\":%s,"
+			 "\"drawer_open_slot\":%d,"
+			 "\"medication_name\":\"%s\"," 
 			 "\"pills_left\":%d,"
 			 "\"pills_per_dose\":%d,"
 			 "\"doses_remaining\":%d,"
-			 "\"dispense_mode\":\"sensor_based\","
+			 "\"dispense_mode\":\"sensor_based\"," 
 			 "\"piezo_enabled\":true,"
 			 "\"hall_enabled\":true,"
 			 "\"ir_enabled\":true,"
-			 "\"last_dispensed\":\"%s\","
-			 "\"last_event\":\"%s\","
-			 "\"last_dispense_result\":\"%s\","
-			 "\"notes\":\"%s\","
+			 "\"last_dispensed\":\"%s\"," 
+			 "\"last_event\":\"%s\"," 
+			 "\"last_dispense_result\":\"%s\"," 
+			 "\"notes\":\"%s\"," 
 			 "\"dispense_fail\":%s,"
 			 "\"low_pill_warn\":%s,"
 			 "\"history\":%s,"
@@ -2834,6 +3368,8 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 			 snapshot->last_ack_action,
 			 snapshot->last_ack_result,
 			 json_bool(snapshot->awaiting_dispense_ack),
+			 json_bool(snapshot->awaiting_drawer_open),
+			 snapshot->drawer_open_slot,
 			 active_slot->medication_name,
 			 active_slot->pills_left,
 			 active_slot->pills_per_dose,
@@ -3012,7 +3548,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"let webEditSlot='0';"
 		"const text=(id,value)=>{const el=document.getElementById(id);if(el)el.textContent=value;};"
 		"const toLocalDateTimeValue=date=>{const pad=v=>String(v).padStart(2,'0');return date.getFullYear()+'-'+pad(date.getMonth()+1)+'-'+pad(date.getDate())+'T'+pad(date.getHours())+':'+pad(date.getMinutes());};"
-		"const setResult=(id,value)=>{const el=document.getElementById(id);if(!el)return;const normalized=value||'unknown';el.textContent=normalized==='ok'?'Success':normalized==='fail'?'Missed':normalized==='timeout'?'No Response':normalized;el.className=(id==='last-result'?'v ':'')+(normalized==='ok'?'result-ok':normalized==='fail'||normalized==='timeout'?'result-fail':'');};"
+		"const setResult=(id,value)=>{const el=document.getElementById(id);if(!el)return;const normalized=value||'unknown';el.textContent=normalized==='ok'?'Success':normalized==='pending'?'Awaiting Pickup':normalized==='fail'?'Missed':normalized==='timeout'?'No Response':normalized;el.className=(id==='last-result'?'v ':'')+(normalized==='ok'?'result-ok':normalized==='fail'||normalized==='timeout'?'result-fail':'');};"
 		"const setActiveSlotCard=slot=>{for(let n=0;n<5;n+=1){const card=document.getElementById('slot-card-'+n);if(card)card.className='metric '+(n%2===0?'accent-teal ':'accent-amber ')+'slot-card'+(n===slot?' active':'');}};"
 		"const setStatusCopy=msg=>text('control-status',msg);"
 		"const setSlotCard=slot=>{if(!slot||slot.slot==null)return;text('slot-medication-'+slot.slot,slot.medication_name||'Waiting for data');text('slot-left-'+slot.slot,displayNumber(slot.pills_left));text('slot-dose-'+slot.slot,displayNumber(slot.pills_per_dose));text('slot-doses-'+slot.slot,displayNumber(slot.doses_remaining));text('slot-schedule-'+slot.slot,slot.schedule||'none');setResult('slot-result-'+slot.slot,slot.last_dispense_result||'unknown');};"
@@ -3044,7 +3580,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"const slots=Array.isArray(d.slots)?d.slots:[];latestSlots=slots;slots.forEach(setSlotCard);"
 		"if(!isEditingControls()){const selected=Number(control('control-slot').value);fillControlsFromSlot(getSlotByNumber(selected) || slots.find(slot=>slot&&slot.slot===Number(d.active_profile_slot)) || slots[0]);}"
 		"setActiveSlotCard(Number(d.active_profile_slot)||0);"
-		"if(d.awaiting_dispense_ack){setStatusCopy('Waiting for dispenser confirmation...');}"
+		"if(d.awaiting_drawer_open){const waitSlot=typeof d.drawer_open_slot==='number'&&d.drawer_open_slot>=0?d.drawer_open_slot:d.active_profile_slot;setStatusCopy('Dispense done. Waiting for drawer open on slot '+waitSlot+' to confirm pickup.');}else if(d.awaiting_dispense_ack){setStatusCopy('Waiting for dispenser confirmation...');}"
 		"setBridgeState(Boolean(d.bridge_connected),d.controller_transport);"
 		"const failBanner=document.getElementById('fail-banner');if(failBanner)failBanner.className='alert-banner'+(d.dispense_fail?' visible':'');"
 		"const lowBanner=document.getElementById('low-pill-banner');if(lowBanner)lowBanner.className='warn-banner'+(d.low_pill_warn?' visible':'');"
@@ -3247,6 +3783,7 @@ void app_main(void)
 
 	start_audio_feedback();
 	start_led_feedback();
+	start_hall_signal_input();
 	start_lcd_display();
 	start_uart_bridge();
 	start_wifi_ap();
