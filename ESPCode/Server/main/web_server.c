@@ -16,6 +16,7 @@
 
 #include "audio_feedback.h"
 #include "bridge_state.h"
+#include "debug_log.h"
 #include "led_feedback.h"
 #include "notify.h"
 #include "time_utils.h"
@@ -54,6 +55,32 @@ static esp_err_t logo_get_handler(httpd_req_t *req)
 	httpd_resp_set_type(req, "image/png");
 	httpd_resp_set_hdr(req, "Cache-Control", "public, max-age=86400");
 	return httpd_resp_send(req, (const char *)logo_png_start, logo_png_end - logo_png_start);
+}
+
+/* Plain-text recent log dump, readable over WiFi from any browser (e.g.
+ * http://portapill.local/api/debug-log), for exactly the situation where
+ * there's no physical room to plug a USB cable into the ESP once it's
+ * inside the assembled device. Reload the page to get a fresh snapshot,
+ * this isn't a live stream, just a point-in-time copy of the recent
+ * in-RAM log buffer (see debug_log.c). */
+static esp_err_t debug_log_get_handler(httpd_req_t *req)
+{
+	char *buf;
+	size_t len;
+	esp_err_t result;
+
+	buf = malloc(DEBUG_LOG_BUF_SIZE + 1);
+	if (buf == NULL) {
+		return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+	}
+
+	len = debug_log_snapshot(buf, DEBUG_LOG_BUF_SIZE + 1);
+
+	httpd_resp_set_type(req, "text/plain");
+	httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+	result = httpd_resp_send(req, buf, (ssize_t)len);
+	free(buf);
+	return result;
 }
 
 static const char *json_bool(bool value)
@@ -243,7 +270,7 @@ static esp_err_t dispense_post_handler(httpd_req_t *req)
 		while (token != NULL) {
 			int requested_slot = atoi(token);
 			if (bridge_slot_index_from_number(requested_slot) < 0 ||
-			    !bridge_enqueue_dispense_slot_locked(&bridge_state, requested_slot)) {
+			    !bridge_enqueue_dispense_slot_locked(&bridge_state, requested_slot, false)) {
 				xSemaphoreGive(bridge_state_mutex);
 				return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid or full dispense queue");
 			}
@@ -260,7 +287,7 @@ static esp_err_t dispense_post_handler(httpd_req_t *req)
 		}
 
 		if (bridge_slot_index_from_number(slot_number) < 0 ||
-		    !bridge_enqueue_dispense_slot_locked(&bridge_state, slot_number)) {
+		    !bridge_enqueue_dispense_slot_locked(&bridge_state, slot_number, false)) {
 			xSemaphoreGive(bridge_state_mutex);
 			return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid slot number or full queue");
 		}
@@ -328,7 +355,8 @@ static esp_err_t feedback_test_post_handler(httpd_req_t *req)
 
 /* Test-only: simulates a Pico ACKing a dispense as "ok" for `slot`, without
  * any real hardware attached. Arms the exact same awaiting_drawer_open
- * state and NOTIFY_REMINDER_DELAY_MIN-minute reminder timer a real dispense
+ * state and escalating reminder timers (NOTIFY_REMINDER_STAGE_COUNT stages,
+ * NOTIFY_REMINDER_DELAYS_MIN in notify.h) a real dispense
  * ACK would, so the full pickup-confirmation / "pickup not confirmed"
  * notification pipeline can be exercised end to end before the Pico and
  * drawer sensor are wired up. Wired to the dashboard's "Simulate Dispense"
@@ -709,7 +737,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"<div class=\"hero-text\">"
 		"<div class=\"eyebrow\">Smart Medication Management</div>"
 		"<h1>PortaPill</h1>"
-		"<p class=\"lede\">Never wonder if today's dose was taken. PortaPill keeps every station stocked and dispensing right on schedule.</p>"
+		"<p class=\"lede\">Never wonder if today's dose was taken. PortaPill keeps every slot stocked and dispensing right on schedule.</p>"
 		"</div>"
 		"<div class=\"status-pill\" id=\"bridge-pill\"><span class=\"dot\"></span><span id=\"bridge-label\">Connecting...</span></div>"
 		"</div>"
@@ -721,7 +749,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"<p class=\"hero-caption\" id=\"bridge-copy\">Dashboard is running. Waiting for the dispenser to connect.</p>"
 		"</section>"
 		"<div id=\"fail-banner\" class=\"alert-banner\">&#9888; Dispense failure detected. Check the dispenser.</div>"
-		"<div id=\"low-pill-banner\" class=\"warn-banner\">&#9888; Low pill count. One or more stations need refilling soon.</div>"
+		"<div id=\"low-pill-banner\" class=\"warn-banner\">&#9888; Low pill count. One or more slots need refilling soon.</div>"
 		"<nav class=\"tabbar\" id=\"tabbar\">"
 		"<button class=\"tab-btn active\" type=\"button\" data-tab=\"dashboard\">Dashboard</button>"
 		"<button class=\"tab-btn\" type=\"button\" data-tab=\"actions\">Schedule &amp; Actions</button>"
@@ -732,37 +760,37 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"<div class=\"stack\">"
 		"<section class=\"tab-panel active\" data-panel=\"dashboard\">"
 		"<div class=\"panel\">"
-		"<div class=\"panel-head\"><div><p class=\"panel-title\">Medication Stations</p><div>The highlighted card is the currently active station.</div></div></div>"
+		"<div class=\"panel-head\"><div><p class=\"panel-title\">Medication Slots</p><div>The highlighted card is the currently active slot.</div></div></div>"
 		"<div class=\"slot-grid\">"
-		"<article class=\"slot-card\" id=\"slot-card-0\"><div class=\"slot-label\"><svg class=\"slot-icon\" viewBox=\"0 0 24 24\" width=\"14\" height=\"14\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"capGrad0\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"49%\" stop-color=\"#0c6b66\"/><stop offset=\"50%\" stop-color=\"#ffffff\"/></linearGradient></defs><rect x=\"3\" y=\"9\" width=\"18\" height=\"6\" rx=\"3\" transform=\"rotate(-45 12 12)\" fill=\"url(#capGrad0)\" stroke=\"#0c6b66\" stroke-width=\"1.2\"/></svg>Station 1</div><div class=\"slot-med\" id=\"slot-medication-0\">Not set up yet</div>"
+		"<article class=\"slot-card\" id=\"slot-card-0\"><div class=\"slot-label\"><svg class=\"slot-icon\" viewBox=\"0 0 24 24\" width=\"14\" height=\"14\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"capGrad0\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"49%\" stop-color=\"#0c6b66\"/><stop offset=\"50%\" stop-color=\"#ffffff\"/></linearGradient></defs><rect x=\"3\" y=\"9\" width=\"18\" height=\"6\" rx=\"3\" transform=\"rotate(-45 12 12)\" fill=\"url(#capGrad0)\" stroke=\"#0c6b66\" stroke-width=\"1.2\"/></svg>Slot 1</div><div class=\"slot-med\" id=\"slot-medication-0\">Not set up yet</div>"
 		"<div class=\"slot-details\" id=\"slot-details-0\"><div class=\"slot-pills-label\">Pills left</div><div class=\"slot-pills\" id=\"slot-left-0\">--</div><div class=\"slot-stats-row\"><div class=\"stat\"><span class=\"stat-label\">Dose</span><span class=\"stat-value\" id=\"slot-dose-0\">--</span></div><div class=\"stat\"><span class=\"stat-label\">Schedule</span><span class=\"stat-value\" id=\"slot-schedule-0\">None</span></div></div><span class=\"badge badge-muted\" id=\"slot-result-0\">No data yet</span><div class=\"slot-last\" id=\"slot-last-0\">No dispenses yet</div></div>"
-		"<div class=\"slot-empty-hint\" id=\"slot-empty-0\">Tap &ldquo;Edit Station Settings&rdquo; below to set up this station.</div>"
+		"<div class=\"slot-empty-hint\" id=\"slot-empty-0\">Tap &ldquo;Edit Slot Settings&rdquo; below to set up this slot.</div>"
 		"</article>"
-		"<article class=\"slot-card\" id=\"slot-card-1\"><div class=\"slot-label\"><svg class=\"slot-icon\" viewBox=\"0 0 24 24\" width=\"14\" height=\"14\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"capGrad1\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"49%\" stop-color=\"#9a6510\"/><stop offset=\"50%\" stop-color=\"#ffffff\"/></linearGradient></defs><rect x=\"3\" y=\"9\" width=\"18\" height=\"6\" rx=\"3\" transform=\"rotate(-45 12 12)\" fill=\"url(#capGrad1)\" stroke=\"#9a6510\" stroke-width=\"1.2\"/></svg>Station 2</div><div class=\"slot-med\" id=\"slot-medication-1\">Not set up yet</div>"
+		"<article class=\"slot-card\" id=\"slot-card-1\"><div class=\"slot-label\"><svg class=\"slot-icon\" viewBox=\"0 0 24 24\" width=\"14\" height=\"14\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"capGrad1\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"49%\" stop-color=\"#9a6510\"/><stop offset=\"50%\" stop-color=\"#ffffff\"/></linearGradient></defs><rect x=\"3\" y=\"9\" width=\"18\" height=\"6\" rx=\"3\" transform=\"rotate(-45 12 12)\" fill=\"url(#capGrad1)\" stroke=\"#9a6510\" stroke-width=\"1.2\"/></svg>Slot 2</div><div class=\"slot-med\" id=\"slot-medication-1\">Not set up yet</div>"
 		"<div class=\"slot-details\" id=\"slot-details-1\"><div class=\"slot-pills-label\">Pills left</div><div class=\"slot-pills\" id=\"slot-left-1\">--</div><div class=\"slot-stats-row\"><div class=\"stat\"><span class=\"stat-label\">Dose</span><span class=\"stat-value\" id=\"slot-dose-1\">--</span></div><div class=\"stat\"><span class=\"stat-label\">Schedule</span><span class=\"stat-value\" id=\"slot-schedule-1\">None</span></div></div><span class=\"badge badge-muted\" id=\"slot-result-1\">No data yet</span><div class=\"slot-last\" id=\"slot-last-1\">No dispenses yet</div></div>"
-		"<div class=\"slot-empty-hint\" id=\"slot-empty-1\">Tap &ldquo;Edit Station Settings&rdquo; below to set up this station.</div>"
+		"<div class=\"slot-empty-hint\" id=\"slot-empty-1\">Tap &ldquo;Edit Slot Settings&rdquo; below to set up this slot.</div>"
 		"</article>"
-		"<article class=\"slot-card\" id=\"slot-card-2\"><div class=\"slot-label\"><svg class=\"slot-icon\" viewBox=\"0 0 24 24\" width=\"14\" height=\"14\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"capGrad2\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"49%\" stop-color=\"#0c6b66\"/><stop offset=\"50%\" stop-color=\"#ffffff\"/></linearGradient></defs><rect x=\"3\" y=\"9\" width=\"18\" height=\"6\" rx=\"3\" transform=\"rotate(-45 12 12)\" fill=\"url(#capGrad2)\" stroke=\"#0c6b66\" stroke-width=\"1.2\"/></svg>Station 3</div><div class=\"slot-med\" id=\"slot-medication-2\">Not set up yet</div>"
+		"<article class=\"slot-card\" id=\"slot-card-2\"><div class=\"slot-label\"><svg class=\"slot-icon\" viewBox=\"0 0 24 24\" width=\"14\" height=\"14\" xmlns=\"http://www.w3.org/2000/svg\"><defs><linearGradient id=\"capGrad2\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"49%\" stop-color=\"#0c6b66\"/><stop offset=\"50%\" stop-color=\"#ffffff\"/></linearGradient></defs><rect x=\"3\" y=\"9\" width=\"18\" height=\"6\" rx=\"3\" transform=\"rotate(-45 12 12)\" fill=\"url(#capGrad2)\" stroke=\"#0c6b66\" stroke-width=\"1.2\"/></svg>Slot 3</div><div class=\"slot-med\" id=\"slot-medication-2\">Not set up yet</div>"
 		"<div class=\"slot-details\" id=\"slot-details-2\"><div class=\"slot-pills-label\">Pills left</div><div class=\"slot-pills\" id=\"slot-left-2\">--</div><div class=\"slot-stats-row\"><div class=\"stat\"><span class=\"stat-label\">Dose</span><span class=\"stat-value\" id=\"slot-dose-2\">--</span></div><div class=\"stat\"><span class=\"stat-label\">Schedule</span><span class=\"stat-value\" id=\"slot-schedule-2\">None</span></div></div><span class=\"badge badge-muted\" id=\"slot-result-2\">No data yet</span><div class=\"slot-last\" id=\"slot-last-2\">No dispenses yet</div></div>"
-		"<div class=\"slot-empty-hint\" id=\"slot-empty-2\">Tap &ldquo;Edit Station Settings&rdquo; below to set up this station.</div>"
+		"<div class=\"slot-empty-hint\" id=\"slot-empty-2\">Tap &ldquo;Edit Slot Settings&rdquo; below to set up this slot.</div>"
 		"</article>"
 		"</div>"
 		"</div>"
 		"</section>"
 		"<section class=\"tab-panel\" data-panel=\"actions\">"
 		"<div class=\"panel\">"
-		"<div class=\"panel-head\"><div><p class=\"panel-title\">Actions</p><div>Choose a station, then dispense now or update its settings.</div></div></div>"
+		"<div class=\"panel-head\"><div><p class=\"panel-title\">Actions</p><div>Choose a slot, then dispense now or update its settings.</div></div></div>"
 		"<div class=\"controls\">"
-		"<label>Station<select id=\"control-slot\"><option value=\"0\">Station 1</option><option value=\"1\">Station 2</option><option value=\"2\">Station 3</option></select></label>"
+		"<label>Slot<select id=\"control-slot\"><option value=\"0\">Slot 1</option><option value=\"1\">Slot 2</option><option value=\"2\">Slot 3</option></select></label>"
 		"</div>"
 		"<button id=\"dispense-slot\" type=\"button\" class=\"btn-primary\">Dispense Now</button>"
 		"<div class=\"btn-row\">"
-		"<button id=\"edit-start\" type=\"button\" class=\"alt\">Edit Station Settings</button>"
-		"<button id=\"save-profile\" type=\"button\" style=\"display:none\">Save Station Settings</button>"
+		"<button id=\"edit-start\" type=\"button\" class=\"alt\">Edit Slot Settings</button>"
+		"<button id=\"save-profile\" type=\"button\" style=\"display:none\">Save Slot Settings</button>"
 		"</div>"
 		"<div class=\"edit-panel\" id=\"edit-panel\">"
 		"<label>Medication Name<input id=\"control-med\" maxlength=\"31\" placeholder=\"Aspirin\"></label>"
-		"<label>Pills in Station<input id=\"control-total\" type=\"number\" min=\"1\" step=\"1\" value=\"20\"></label>"
+		"<label>Pills in Slot<input id=\"control-total\" type=\"number\" min=\"1\" step=\"1\" value=\"20\"></label>"
 		"<label>Pills per Dose<input id=\"control-dose\" type=\"number\" min=\"1\" step=\"1\" value=\"1\"></label>"
 		"<div class=\"schedule-block\">"
 		"<div class=\"schedule-label\">Daily Schedule</div>"
@@ -784,7 +812,7 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"<section class=\"tab-panel\" data-panel=\"history\">"
 		"<div class=\"panel\">"
 		"<div class=\"panel-head\"><div><p class=\"panel-title\">Dispense Log</p><div>Most recent dispense events, newest first.</div></div></div>"
-		"<table class=\"hist-table\"><thead><tr><th>#</th><th>Station</th><th>Medication</th><th>Result</th><th>Pills After</th><th>Time</th></tr></thead>"
+		"<table class=\"hist-table\"><thead><tr><th>#</th><th>Slot</th><th>Medication</th><th>Result</th><th>Pills After</th><th>Time</th></tr></thead>"
 		"<tbody id=\"history-body\"><tr><td colspan=\"6\">No dispenses recorded yet. This fills in automatically once a dose is dispensed.</td></tr></tbody></table>"
 		"</div>"
 		"</section>"
@@ -837,34 +865,34 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"if(card){card.classList.remove('result-ok','result-fail','result-pending');const rc=hasData?resultCardClass(slot.last_dispense_result):'';if(rc)card.classList.add(rc);}"
 		"if(!hasData)return;"
 		"text('slot-left-'+slot.slot,displayNumber(slot.pills_left));text('slot-dose-'+slot.slot,slot.pills_per_dose>0?slot.pills_per_dose+'x':'--');text('slot-schedule-'+slot.slot,slot.schedule&&slot.schedule!=='none'?slot.schedule:'None');const badge=resultBadge(slot.last_dispense_result);const el=document.getElementById('slot-result-'+slot.slot);if(el){el.textContent=badge.text;el.className='badge '+badge.cls;}"
-		"const event=slot.last_event&&!PLACEHOLDER_EVENTS.includes(slot.last_event)?slot.last_event:'';const dispensed=slot.last_dispensed&&slot.last_dispensed!=='No confirmed dispense yet'?slot.last_dispensed:'';text('slot-last-'+slot.slot,event?(event+(dispensed?', '+dispensed:'')):'No previous dispense for this station.');};"
+		"const event=slot.last_event&&!PLACEHOLDER_EVENTS.includes(slot.last_event)?slot.last_event:'';const dispensed=slot.last_dispensed&&slot.last_dispensed!=='No confirmed dispense yet'?slot.last_dispensed:'';text('slot-last-'+slot.slot,event?(event+(dispensed?', '+dispensed:'')):'No previous dispense for this slot.');};"
 		"const isEditingControls=()=>{const active=document.activeElement;if(!active)return false;if(controlIds.includes(active.id))return true;const panel=document.getElementById('edit-panel');return Boolean(panel&&panel.contains(active));};"
 		"const getSlotByNumber=slotNumber=>latestSlots.find(slot=>slot&&slot.slot===slotNumber);"
 		"const fillControlsFromSlot=slot=>{if(!slot)return;control('control-slot').value=String(slot.slot);control('control-med').value=slot.medication_name&&slot.medication_name!=='Waiting for data'?slot.medication_name:'';control('control-total').value=slot.total_pills>0?slot.total_pills:20;control('control-dose').value=slot.pills_per_dose>0?slot.pills_per_dose:1;setScheduleFromString(slot.schedule);};"
 		"const postForm=async(url,data)=>{const r=await fetch(url,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:new URLSearchParams(data)});if(!r.ok)throw new Error(await r.text());return r.json();};"
 		"const setEditPanel=(open)=>{const panel=document.getElementById('edit-panel');const startBtn=control('edit-start');const saveBtn=control('save-profile');if(panel)panel.style.display=open?'grid':'none';if(startBtn)startBtn.style.display=open?'none':'';if(saveBtn)saveBtn.style.display=open?'':'none';};"
 		"const setWebEditMode=async(on)=>{const slot=control('control-slot').value;await postForm('/api/edit-mode',{slot,state:on?'on':'off'});webEditActive=on;webEditSlot=slot;};"
-		"const saveProfile=async()=>{const data={slot:control('control-slot').value,med:control('control-med').value,total:control('control-total').value,dose:control('control-dose').value,time:DEFAULT_DISPENSE_TIME_MS,schedule:getScheduleValue()};await postForm('/api/profile',data);setStatusCopy('Station settings saved.');await refreshStatus();if(webEditActive){await setWebEditMode(false);setEditPanel(false);}};"
+		"const saveProfile=async()=>{const data={slot:control('control-slot').value,med:control('control-med').value,total:control('control-total').value,dose:control('control-dose').value,time:DEFAULT_DISPENSE_TIME_MS,schedule:getScheduleValue()};await postForm('/api/profile',data);setStatusCopy('Slot settings saved.');await refreshStatus();if(webEditActive){await setWebEditMode(false);setEditPanel(false);}};"
 		"const dispenseSelected=async()=>{await postForm('/api/dispense',{slot:control('control-slot').value});setStatusCopy('Dispense started. Waiting for confirmation...');await refreshStatus();};"
 		"let manualTimeDirty=false;"
 		"const syncTime=async()=>{let epoch;if(manualTimeDirty){const raw=control('control-manual-time').value;if(!raw)throw new Error('Pick a date/time first, or leave it alone to sync to right now.');epoch=Math.floor(new Date(raw+'Z').getTime()/1000);if(!Number.isFinite(epoch)||epoch<=0)throw new Error('That date/time is not valid.');}else{epoch=Math.floor(Date.now()/1000);}await postForm('/api/time-sync',{epoch:String(epoch)});manualTimeDirty=false;control('control-manual-time').value=toLocalDateTimeValue(new Date());setStatusCopy('Clock synced to '+new Date(epoch*1000).toLocaleString()+'.');};"
 		"const testFeedback=async(result)=>{await postForm('/api/test-feedback',{result});setStatusCopy(result==='success'?'Success alert test sent.':'Failure alert test sent.');};"
-		/* Keep this number in sync with NOTIFY_REMINDER_DELAY_MIN in notify.h. It's a
+		/* Keep this wording in sync with NOTIFY_REMINDER_DELAYS_MIN in notify.h. It's a
 		 * display-only echo, not read from the firmware, since this is one string inside
-		 * a C literal with no live link to that macro. */
-		"const simulateDispense=async()=>{const slot=control('control-slot').value;await postForm('/api/simulate-dispense',{slot});setStatusCopy('Simulated a dispense for the selected station. If the drawer stays closed, a reminder notification fires in 5 minutes.');await refreshStatus();};"
+		 * a C literal with no live link to that array. */
+		"const simulateDispense=async()=>{const slot=control('control-slot').value;await postForm('/api/simulate-dispense',{slot});setStatusCopy('Simulated a dispense for the selected slot. If the drawer stays closed, reminder notifications fire at 5, 10, 15, and 20 minutes.');await refreshStatus();};"
 		"const setBridgeState=connected=>{const pill=document.getElementById('bridge-pill');text('bridge-label',connected?'Device Ready':'Waiting for Device');text('bridge-copy',connected?'Your dispenser is connected and sending live updates.':'Dashboard is running. Waiting for the dispenser to connect.');if(pill)pill.className=connected?'status-pill online':'status-pill';text('controller-transport',connected?'Device is ready':'Waiting for connection');};"
 		"async function refreshStatus(){"
 		"try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw new Error('bad-response');const d=await r.json();"
 		"text('device-time',d.device_time||'Unavailable');"
-		"const formatNextDispense=str=>str?str.replace(/S(\\d+)/g,(_,n)=>'Station '+(Number(n)+1)).replace('TMRW','tomorrow').replace(' FOR ',' \\u00b7 '):str;"
+		"const formatNextDispense=str=>str?str.replace(/S(\\d+)/g,(_,n)=>'Slot '+(Number(n)+1)).replace('TMRW','tomorrow').replace(' FOR ',' \\u00b7 '):str;"
 		"text('next-dispense',formatNextDispense(d.next_dispense)||'No schedule set');"
 		"text('ntfy-topic',d.ntfy_topic||'unknown');"
 		"{const ntfyLink=document.getElementById('ntfy-link');if(ntfyLink&&d.ntfy_subscribe_url)ntfyLink.href=d.ntfy_subscribe_url;}"
 		"const slots=Array.isArray(d.slots)?d.slots:[];latestSlots=slots;slots.forEach(setSlotCard);"
 		"if(!webEditActive&&!isEditingControls()){const selected=Number(control('control-slot').value);fillControlsFromSlot(getSlotByNumber(selected) || slots.find(slot=>slot&&slot.slot===Number(d.active_profile_slot)) || slots[0]);}"
 		"setActiveSlotCard(Number(d.active_profile_slot)||0);"
-		"if(d.awaiting_drawer_open){const waitStation=typeof d.drawer_open_slot==='number'&&d.drawer_open_slot>=0?d.drawer_open_slot+1:(Number(d.active_profile_slot)||0)+1;setStatusCopy('Dispense done. Waiting for the drawer to open on Station '+waitStation+' to confirm pickup.');}else if(d.awaiting_dispense_ack){setStatusCopy('Waiting for dispenser confirmation...');}"
+		"if(d.awaiting_drawer_open){const waitStation=typeof d.drawer_open_slot==='number'&&d.drawer_open_slot>=0?d.drawer_open_slot+1:(Number(d.active_profile_slot)||0)+1;setStatusCopy('Dispense done. Waiting for the drawer to open on Slot '+waitStation+' to confirm pickup.');}else if(d.awaiting_dispense_ack){setStatusCopy('Waiting for dispenser confirmation...');}"
 		"setBridgeState(Boolean(d.bridge_connected));"
 		"const failBanner=document.getElementById('fail-banner');if(failBanner)failBanner.className='alert-banner'+(d.dispense_fail?' visible':'');"
 		"const lowBanner=document.getElementById('low-pill-banner');if(lowBanner)lowBanner.className='warn-banner'+(d.low_pill_warn?' visible':'');"
@@ -873,9 +901,9 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 		"}catch(e){text('device-time','Disconnected');text('next-dispense','--');setBridgeState(false);}"
 		"}"
 		"document.querySelectorAll('.tab-btn').forEach(btn=>{btn.addEventListener('click',()=>{document.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));document.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));btn.classList.add('active');const panel=document.querySelector('.tab-panel[data-panel=\"'+btn.dataset.tab+'\"]');if(panel)panel.classList.add('active');});});"
-		"control('edit-start').addEventListener('click',()=>{fillControlsFromSlot(getSlotByNumber(Number(control('control-slot').value)));setWebEditMode(true).then(()=>{setEditPanel(true);setStatusCopy('Edit mode on for selected station.');}).catch(e=>setStatusCopy('Could not start edit mode: '+(e.message||'unknown error')));});"
+		"control('edit-start').addEventListener('click',()=>{fillControlsFromSlot(getSlotByNumber(Number(control('control-slot').value)));setWebEditMode(true).then(()=>{setEditPanel(true);setStatusCopy('Edit mode on for selected slot.');}).catch(e=>setStatusCopy('Could not start edit mode: '+(e.message||'unknown error')));});"
 		"control('add-time').addEventListener('click',()=>{addTimeRow();});"
-		"control('save-profile').addEventListener('click',()=>{saveProfile().catch(e=>setStatusCopy('Could not save station settings: '+(e.message||'unknown error')));});"
+		"control('save-profile').addEventListener('click',()=>{saveProfile().catch(e=>setStatusCopy('Could not save slot settings: '+(e.message||'unknown error')));});"
 		"control('dispense-slot').addEventListener('click',()=>{dispenseSelected().catch(e=>setStatusCopy('Could not start dispense: '+(e.message||'unknown error')));});"
 		"control('control-manual-time').addEventListener('input',()=>{manualTimeDirty=true;});"
 		"control('sync-time').addEventListener('click',()=>{syncTime().catch(e=>setStatusCopy(e.message||'Could not sync the clock.'));});"
@@ -900,7 +928,7 @@ void start_webserver(void)
 {
 	httpd_config_t config = HTTPD_DEFAULT_CONFIG();
 	httpd_handle_t server = NULL;
-	config.max_uri_handlers = 20; /* currently 18 registered below; leaves headroom for new routes */
+	config.max_uri_handlers = 20; /* currently 19 registered below; leaves headroom for new routes */
 	config.stack_size = 10240;
 	config.uri_match_fn = httpd_uri_match_wildcard;
 	config.max_open_sockets = 4; // Reserve sockets for DNS + lwIP internals (total lwIP sockets = 10)
@@ -922,6 +950,12 @@ void start_webserver(void)
 			.uri = "/api/status",
 			.method = HTTP_GET,
 			.handler = status_get_handler,
+			.user_ctx = NULL,
+		};
+		httpd_uri_t debug_log = {
+			.uri = "/api/debug-log",
+			.method = HTTP_GET,
+			.handler = debug_log_get_handler,
 			.user_ctx = NULL,
 		};
 		httpd_uri_t profile = {
@@ -1018,6 +1052,7 @@ void start_webserver(void)
 		httpd_register_uri_handler(server, &root);
 		httpd_register_uri_handler(server, &logo);
 		httpd_register_uri_handler(server, &status);
+		httpd_register_uri_handler(server, &debug_log);
 		httpd_register_uri_handler(server, &profile);
 		httpd_register_uri_handler(server, &dispense);
 		httpd_register_uri_handler(server, &time_sync);

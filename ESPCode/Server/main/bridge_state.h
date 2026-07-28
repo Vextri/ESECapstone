@@ -63,7 +63,18 @@ typedef struct {
 	int64_t dispense_ack_deadline_us;
 	int64_t last_update_us;
 	int dispense_queue[PILL_SLOT_COUNT];
+	/* Parallel to dispense_queue: whether each queued slot was queued by the
+	 * schedule checker (true) or a manual trigger, web "Dispense Now" or the
+	 * LCD (false). Read at the moment each entry is popped and started, see
+	 * active_dispense_is_scheduled. */
+	bool dispense_queue_is_scheduled[PILL_SLOT_COUNT];
 	int dispense_queue_count;
+	/* Whether the dispense currently awaiting_dispense_ack was started by the
+	 * schedule checker rather than a manual trigger. Only meaningful while
+	 * awaiting_dispense_ack is true; used at ACK time to decide whether to
+	 * send the "dose dispensed" notification (scheduled doses only, so
+	 * routine manual testing doesn't spam a caretaker's phone). */
+	bool active_dispense_is_scheduled;
 } pico_bridge_state_t;
 
 /* Shared bridge state, defined in bridge_state.c. Guard all access with

@@ -4,6 +4,7 @@ idf_component_register(
         "audio_feedback.c"
         "bridge_state.c"
         "captive_dns.c"
+        "debug_log.c"
         "drawer_sensor.c"
         "lcd_display.c"
         "led_feedback.c"

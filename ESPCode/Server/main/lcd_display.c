@@ -336,11 +336,56 @@ static void lcd_draw_string(uint16_t x, uint16_t y, const char *str, uint16_t co
 	}
 }
 
+/* screen_get_next_dispense_string() returns a compact machine-readable
+ * string like "9:30 AM TMRW FOR S2", meant for the website's own JS to
+ * re-word into "Station 3" etc, the LCD has no such transform layer and
+ * was just drawing that raw "S2" token straight to the screen. This scans
+ * for any 'S' immediately followed by digits and replaces it with
+ * "SLOT <1-indexed number>" in place, leaving everything else (the time,
+ * TMRW, FOR, & / , separators for tied slots) untouched. */
+static void screen_format_next_dispense(const char *raw, char *out, size_t out_size)
+{
+	size_t out_len = 0;
+	const char *p = raw;
+
+	if (out == NULL || out_size == 0) {
+		return;
+	}
+	if (raw == NULL) {
+		out[0] = '\0';
+		return;
+	}
+
+	while (*p != '\0' && out_len + 1 < out_size) {
+		if (*p == 'S' && p[1] >= '0' && p[1] <= '9') {
+			int slot_num = 0;
+			const char *digits = p + 1;
+			int written;
+
+			while (*digits >= '0' && *digits <= '9') {
+				slot_num = slot_num * 10 + (*digits - '0');
+				digits++;
+			}
+			written = snprintf(out + out_len, out_size - out_len, "SLOT %d", slot_num + 1);
+			if (written < 0 || (size_t)written >= out_size - out_len) {
+				out_len = out_size - 1;
+				break;
+			}
+			out_len += (size_t)written;
+			p = digits;
+		} else {
+			out[out_len++] = *p++;
+		}
+	}
+	out[out_len] = '\0';
+}
+
 /* Renders the live pill slot data onto the LCD. Called from screen_task. */
 static void screen_draw_ui(const pico_bridge_state_t *snapshot)
 {
 	char buf[32];
-	char next_dispense[32];
+	char next_dispense_raw[32];
+	char next_dispense[48];
 	int slot_index;
 	int si;
 	time_t now;
@@ -414,9 +459,11 @@ static void screen_draw_ui(const pico_bridge_state_t *snapshot)
 
 		lcd_fill_rect(0, row_y, SCREEN_W, 60, LCD_BLACK);
 
-		/* Slot label: S0 .. S2 */
+		/* Slot label: S1..S3, 1-indexed to match the header above and the
+		 * rest of the LCD; kept short rather than the full word "SLOT"
+		 * since this column only has ~68px before the MED column starts. */
 		buf[0] = 'S';
-		buf[1] = (char)('0' + slot_index);
+		buf[1] = (char)('1' + slot_index);
 		buf[2] = '\0';
 		lcd_draw_string(8, (uint16_t)(row_y + 20), buf, slot_col, LCD_BLACK, 2);
 
@@ -483,7 +530,8 @@ static void screen_draw_ui(const pico_bridge_state_t *snapshot)
 	}
 
 	/* Next dispense banner uses free space from reducing rows to 0..2. */
-	screen_get_next_dispense_string(snapshot, next_dispense, sizeof(next_dispense));
+	screen_get_next_dispense_string(snapshot, next_dispense_raw, sizeof(next_dispense_raw));
+	screen_format_next_dispense(next_dispense_raw, next_dispense, sizeof(next_dispense));
 	lcd_fill_rect(0, 262, SCREEN_W, 58, LCD_DKGREY);
 	lcd_draw_hline(0, 262, SCREEN_W, LCD_WHITE);
 	lcd_draw_string(8, 278, "NEXT DISPENSE AT", LCD_CYAN, LCD_DKGREY, 2);
@@ -520,7 +568,7 @@ static void screen_draw_slot_menu(const pico_bridge_state_t *snap, int cursor)
 
 	lcd_fill_rect(0, 0, SCREEN_W, SCREEN_H, LCD_BLACK);
 	lcd_fill_rect(0, 0, SCREEN_W, 44, LCD_DKGREY);
-	lcd_draw_string(8, 14, "SELECT SLOT", LCD_CYAN, LCD_DKGREY, 2);
+	lcd_draw_string(8, 14, "SLOTS", LCD_CYAN, LCD_DKGREY, 2);
 	screen_draw_slot_position_label(cursor);
 	lcd_draw_hline(0, 44, SCREEN_W, LCD_CYAN);
 
@@ -540,7 +588,9 @@ static void screen_draw_slot_menu(const pico_bridge_state_t *snap, int cursor)
 			lcd_fill_rect((uint16_t)(SCREEN_W - 3), y, 3, 52, LCD_WHITE);
 			lcd_draw_string(2, (uint16_t)(y + 18), ">", fg, bg, 2);
 		}
-		buf[0] = 'S'; buf[1] = (char)('0' + i); buf[2] = '\0';
+		/* "S1:".."S3:", the colon keeps this from visually running into the
+		 * medication name right next to it (e.g. "S1ASPIRIN"). */
+		buf[0] = 'S'; buf[1] = (char)('1' + i); buf[2] = ':'; buf[3] = '\0';
 		lcd_draw_string(8, (uint16_t)(y + 18), buf, fg, bg, 2);
 
 		if (s->has_data) {
@@ -558,19 +608,19 @@ static void screen_draw_slot_menu(const pico_bridge_state_t *snap, int cursor)
 		lcd_draw_hline(0, (uint16_t)(y + 52), SCREEN_W, LCD_DKGREY);
 	}
 
-	screen_draw_help_bar("UP/DOWN=MOVE   OK=SELECT   HOLD BACK=HOME");
+	screen_draw_help_bar("UP/DOWN=MOVE   OK=SELECT   HOLD OK=HOME");
 }
 
 static void screen_draw_action_menu(int slot, int cursor)
 {
 	static const char *const actions[3]   = { "DISPENSE NOW", "EDIT PROFILE", "BACK" };
 	static const uint16_t    act_fg[3]    = { LCD_GREEN, LCD_CYAN, LCD_CYAN };
-	char title[20];
+	char title[32];
 	int i;
 
 	lcd_fill_rect(0, 0, SCREEN_W, SCREEN_H, LCD_BLACK);
 	lcd_fill_rect(0, 0, SCREEN_W, 44, LCD_DKGREY);
-	snprintf(title, sizeof(title), "SLOT %d", slot);
+	snprintf(title, sizeof(title), "SLOT %d", slot + 1);
 	lcd_draw_string(8, 14, title, LCD_YELLOW, LCD_DKGREY, 2);
 	screen_draw_slot_position_label(slot);
 	lcd_draw_hline(0, 44, SCREEN_W, LCD_CYAN);
@@ -585,7 +635,7 @@ static void screen_draw_action_menu(int slot, int cursor)
 		lcd_draw_string(32, (uint16_t)(y + 24), actions[i], fg, bg, 2);
 	}
 
-	screen_draw_help_bar("UP/DOWN=MOVE   OK=SELECT   HOLD BACK=HOME");
+	screen_draw_help_bar("UP/DOWN=MOVE   OK=SELECT   HOLD OK=BACK");
 }
 
 static void screen_draw_dispense_confirm(int slot, int cursor)
@@ -607,7 +657,7 @@ static void screen_draw_dispense_confirm(int slot, int cursor)
 	lcd_fill_rect(256, 156, 188, 74, no_sel ? LCD_RED : LCD_DKGREY);
 	lcd_draw_string(308, 184, "NO", no_sel ? LCD_BLACK : LCD_RED, no_sel ? LCD_RED : LCD_DKGREY, 2);
 
-	screen_draw_help_bar("UP/DOWN=CHOOSE   OK=CONFIRM   HOLD BACK=HOME");
+	screen_draw_help_bar("UP/DOWN=CHOOSE   OK=CONFIRM   HOLD OK=CANCEL");
 }
 
 static void screen_draw_feedback_card(const char *title, const char *message, uint16_t accent)
@@ -749,12 +799,12 @@ static void screen_draw_edit(const ui_state_t *st)
 	};
 	char val[40];
 	char hint[42];
-	char title[20];
+	char title[32];
 	int i;
 
 	lcd_fill_rect(0, 0, SCREEN_W, SCREEN_H, LCD_BLACK);
 	lcd_fill_rect(0, 0, SCREEN_W, 44, LCD_DKGREY);
-	snprintf(title, sizeof(title), "EDIT SLOT %d", st->edit_slot);
+	snprintf(title, sizeof(title), "EDIT SLOT %d", st->edit_slot + 1);
 	lcd_draw_string(8, 14, title, LCD_YELLOW, LCD_DKGREY, 2);
 	screen_draw_slot_position_label(st->edit_slot);
 	lcd_draw_hline(0, 44, SCREEN_W, LCD_CYAN);
@@ -796,7 +846,7 @@ static void screen_draw_edit(const ui_state_t *st)
 	}
 	lcd_draw_string(8, 274, hint, LCD_GREY, LCD_BLACK, 1);
 
-	screen_draw_help_bar("UP/DOWN CHANGE  OK NEXT/OPEN  HOLD BACK");
+	screen_draw_help_bar("UP/DOWN CHANGE  OK NEXT/OPEN  HOLD OK=CANCEL");
 }
 
 /* On-screen keyboard for the medication name. Arrow keys hover between
@@ -835,7 +885,7 @@ static void screen_draw_edit_name(const ui_state_t *st)
 		}
 	}
 
-	screen_draw_help_bar("ARROWS=MOVE  OK=TYPE  HOLD BACK=DONE");
+	screen_draw_help_bar("ARROWS=MOVE  OK=TYPE  HOLD OK=DONE");
 }
 
 /* Digit-by-digit schedule editor. Each of LCD_SCHED_MAX_TIMES entries shows
@@ -898,7 +948,7 @@ static void screen_draw_edit_schedule(const ui_state_t *st)
 	}
 
 	lcd_draw_string(8, 288, "OK TOGGLES THIS TIME ON/OFF", LCD_GREY, LCD_BLACK, 1);
-	screen_draw_help_bar("LEFT/RIGHT MOVE  UP/DOWN CHANGE  BACK=DONE");
+	screen_draw_help_bar("LEFT/RIGHT MOVE  UP/DOWN CHANGE  HOLD OK=DONE");
 }
 
 /* Trims trailing blanks, then returns to the field list with the cursor
@@ -1121,6 +1171,7 @@ static void screen_task(void *arg)
 							bridge_send_dispense_for_slot(ui_state.edit_slot);
 							bridge_state.active_profile_slot    = ui_state.edit_slot;
 							bridge_state.awaiting_dispense_ack  = true;
+							bridge_state.active_dispense_is_scheduled = false;
 							bridge_state.awaiting_drawer_open   = false;
 							bridge_state.drawer_open_slot       = -1;
 							bridge_state.dispense_ack_deadline_us =

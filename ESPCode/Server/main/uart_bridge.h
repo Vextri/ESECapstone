@@ -45,10 +45,12 @@ void bridge_send_load_profile_for_slot(const pill_slot_state_t *slot_state);
 /* Sends CMD|action=SET_TIME|epoch=<now> if the ESP's own clock is valid. */
 bool bridge_send_set_time(void);
 
-/* Queues slot_number for dispensing (deduplicated). Caller must hold
- * bridge_state_mutex. Returns false if the queue is full or the slot is
- * invalid. */
-bool bridge_enqueue_dispense_slot_locked(pico_bridge_state_t *state, int slot_number);
+/* Queues slot_number for dispensing (deduplicated). is_scheduled marks
+ * whether this request came from the schedule checker (true) versus a
+ * manual trigger (false), used later to decide whether to send the
+ * "dose dispensed" notification. Caller must hold bridge_state_mutex.
+ * Returns false if the queue is full or the slot is invalid. */
+bool bridge_enqueue_dispense_slot_locked(pico_bridge_state_t *state, int slot_number, bool is_scheduled);
 
 /* Pops and starts the next queued dispense, if any and none is already in
  * flight. Caller must hold bridge_state_mutex. */

@@ -16,27 +16,31 @@
 extern "C" {
 #endif
 
-/* Minutes after a confirmed successful dispense before the "pickup not
- * confirmed" push notification fires. One constant to tune, change this
- * and rebuild, no other code needs to change. */
-#define NOTIFY_REMINDER_DELAY_MIN 5
+/* How many escalating "pickup not confirmed" reminders fire per dispense,
+ * and how many minutes after the dispense each one fires. All are armed at
+ * once when a dispense succeeds; the wording gets more urgent at each
+ * later stage. This array is the one place to edit to change the
+ * schedule, e.g. add a 5th stage or change the spacing, notify.c reads it
+ * directly, nothing else needs to change. */
+#define NOTIFY_REMINDER_STAGE_COUNT 4
+#define NOTIFY_REMINDER_DELAYS_MIN { 5, 10, 15, 20 }
 
-/* Creates the per-slot reminder timers. Call once at boot. */
+/* Creates the per-slot, per-stage reminder timers. Call once at boot. */
 void notify_init(void);
 
-/* Schedules a "pickup not confirmed" reminder for `slot`, to fire
- * NOTIFY_REMINDER_DELAY_MIN minutes after `dispensed_at` (normally
- * time(NULL) at the moment the Pico ACKs a dispense as "ok"). At fire
- * time, the timer checks the live drawer_sensor state (via
- * bridge_state.awaiting_drawer_open) and only actually sends a
- * notification if the drawer still hasn't been opened since, so a
- * confirmed pickup never triggers a spurious reminder.
+/* Arms all NOTIFY_REMINDER_STAGE_COUNT "pickup not confirmed" reminders for
+ * `slot`, at NOTIFY_REMINDER_DELAYS_MIN minutes after `dispensed_at`
+ * (normally time(NULL) at the moment the Pico ACKs a dispense as "ok").
+ * Each stage independently checks this slot's live state right before
+ * sending, and only actually notifies if the drawer still hasn't been
+ * opened by then, so a confirmed pickup never triggers a spurious
+ * reminder, no matter how many stages were armed.
  *
- * If a reminder was already pending for this slot, it's replaced, only
- * the most recent dispense's reminder fires, so back-to-back dispenses of
- * the same slot don't queue up duplicate notifications.
+ * If reminders were already pending for this slot, they're all replaced,
+ * only the most recent dispense's reminders fire, so back-to-back
+ * dispenses of the same slot don't queue up duplicate notifications.
  *
- * Silently does nothing if there's no internet connection when the timer
+ * Silently does nothing if there's no internet connection when a timer
  * fires (checked via wifi_sta_is_connected()), a missed reminder is far
  * better than a crash or a blocked task over a notification that isn't
  * essential to the dispenser's core job. */
@@ -46,6 +50,23 @@ void notify_schedule_dispense_reminder(int slot, const char *medication_name, ti
  * ESP-to-ntfy.sh chain works, wired to the dashboard's "Test Success Alert"
  * button so this is testable without the Pico attached. */
 void notify_send_test(void);
+
+/* Checks a station's pill count for a low/empty transition and sends a
+ * "please refill" push notification if it just crossed into 1 pill left or
+ * 0 pills left. Edge-triggered on old_left -> new_left, call this every time
+ * a station's pills_left is updated with the previous and new values, it
+ * only actually notifies on the instant the count crosses a threshold, not
+ * every time it happens to still be low, and naturally re-arms itself after
+ * a refill. */
+void notify_check_pill_level(int slot, const char *medication_name, int old_left, int new_left);
+
+/* Sends a "dose dispensed" push notification for a scheduled dispense only.
+ * Call this from the DISPENSE ACK path, but only when the dispense that was
+ * just acknowledged was started by the schedule checker, not a manual
+ * "Dispense Now" click or LCD dispense, so routine testing doesn't spam a
+ * caretaker's phone with notifications for doses that were never actually
+ * due. */
+void notify_send_dispensed(int slot, const char *medication_name);
 
 /* Returns this device's ntfy.sh topic name (from ntfy_credentials.h). To
  * receive PortaPill's push notifications, subscribe to this exact topic in

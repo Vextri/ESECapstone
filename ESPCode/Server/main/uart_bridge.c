@@ -25,14 +25,37 @@ static const char *TAG = "time_server";
 #define UART_BRIDGE_BUFFER_SIZE 512
 #define UART_BRIDGE_LINE_SIZE 256
 
+/* Serializes actual writes to the UART port. The heartbeat (uart_bridge_task
+ * itself), the LCD's button handler, and the web server's request handlers
+ * are all separate FreeRTOS tasks that can each independently decide to
+ * send a line at any moment, e.g. a manual "Dispense Now" click landing at
+ * the same instant the 60s SET_TIME heartbeat fires. Without a lock around
+ * the write, two concurrent uart_write_bytes() calls on the same port can
+ * interleave on the wire and glue the tail of one line onto the head of
+ * another with no newline between them, exactly what a live capture
+ * caught: "CMD|action=SET_TIME|epoch=178526CMD|action=DISPENSE|slot=0"
+ * arriving as a single garbled line, silently swallowing the DISPENSE
+ * command entirely (the Pico's parser only ever sees the first action= in
+ * the merged line). This directly explains the intermittent stuck-dispense
+ * bug: it only happens when two sends race, which is far likelier right
+ * after a failed dispense since that takes 30+ seconds, shifting the
+ * heartbeat's timing to land right as someone retries. */
+static SemaphoreHandle_t s_uart_tx_mutex;
+
 static void uart_bridge_send_line(const char *line)
 {
 	if (line == NULL) {
 		return;
 	}
 
+	if (s_uart_tx_mutex != NULL) {
+		xSemaphoreTake(s_uart_tx_mutex, portMAX_DELAY);
+	}
 	uart_write_bytes(UART_BRIDGE_PORT, line, strlen(line));
 	ESP_LOGI(TAG, "UART TX: %s", line);
+	if (s_uart_tx_mutex != NULL) {
+		xSemaphoreGive(s_uart_tx_mutex);
+	}
 }
 
 bool bridge_send_set_time(void)
@@ -63,7 +86,7 @@ void bridge_send_dispense_for_slot(int slot_number)
 	uart_bridge_send_line(line);
 }
 
-static void bridge_start_dispense_locked(pico_bridge_state_t *state, int slot_number)
+static void bridge_start_dispense_locked(pico_bridge_state_t *state, int slot_number, bool is_scheduled)
 {
 	if (state == NULL || bridge_slot_index_from_number(slot_number) < 0) {
 		return;
@@ -72,6 +95,7 @@ static void bridge_start_dispense_locked(pico_bridge_state_t *state, int slot_nu
 	bridge_send_dispense_for_slot(slot_number);
 	state->active_profile_slot = slot_number;
 	state->awaiting_dispense_ack = true;
+	state->active_dispense_is_scheduled = is_scheduled;
 	/* A fresh dispense supersedes any earlier drawer-open wait (e.g. this
 	 * slot's previous dispense was never picked up before a new one fired). */
 	state->awaiting_drawer_open = false;
@@ -81,7 +105,7 @@ static void bridge_start_dispense_locked(pico_bridge_state_t *state, int slot_nu
 	bridge_copy_string(state->last_ack_result, sizeof(state->last_ack_result), "pending");
 }
 
-bool bridge_enqueue_dispense_slot_locked(pico_bridge_state_t *state, int slot_number)
+bool bridge_enqueue_dispense_slot_locked(pico_bridge_state_t *state, int slot_number, bool is_scheduled)
 {
 	if (state == NULL || bridge_slot_index_from_number(slot_number) < 0) {
 		return false;
@@ -101,6 +125,7 @@ bool bridge_enqueue_dispense_slot_locked(pico_bridge_state_t *state, int slot_nu
 		return false;
 	}
 
+	state->dispense_queue_is_scheduled[state->dispense_queue_count] = is_scheduled;
 	state->dispense_queue[state->dispense_queue_count++] = slot_number;
 	return true;
 }
@@ -108,19 +133,24 @@ bool bridge_enqueue_dispense_slot_locked(pico_bridge_state_t *state, int slot_nu
 bool bridge_start_next_dispense_locked(pico_bridge_state_t *state)
 {
 	int next_slot;
+	bool next_is_scheduled;
 
 	if (state == NULL || state->awaiting_dispense_ack || state->dispense_queue_count <= 0) {
 		return false;
 	}
 
 	next_slot = state->dispense_queue[0];
+	next_is_scheduled = state->dispense_queue_is_scheduled[0];
 	if (state->dispense_queue_count > 1) {
 		memmove(&state->dispense_queue[0],
 			&state->dispense_queue[1],
 			(size_t)(state->dispense_queue_count - 1) * sizeof(state->dispense_queue[0]));
+		memmove(&state->dispense_queue_is_scheduled[0],
+			&state->dispense_queue_is_scheduled[1],
+			(size_t)(state->dispense_queue_count - 1) * sizeof(state->dispense_queue_is_scheduled[0]));
 	}
 	state->dispense_queue_count--;
-	bridge_start_dispense_locked(state, next_slot);
+	bridge_start_dispense_locked(state, next_slot, next_is_scheduled);
 	return true;
 }
 
@@ -259,12 +289,20 @@ static void bridge_handle_ack_line(pico_bridge_state_t *state, const char *line)
 			led_enqueue_event(LED_EVENT_SUCCESS, dispense_slot);
 
 			notify_schedule_dispense_reminder(dispense_slot, slot_state->medication_name, time(NULL));
+			if (state->active_dispense_is_scheduled) {
+				notify_send_dispensed(dispense_slot, slot_state->medication_name);
+			}
 
 			ESP_LOGI(TAG, "Dispense for slot %d acknowledged. Waiting for hall trigger to mark taken.",
 				 dispense_slot);
 		} else if (strcmp(result, "fail") == 0 || strcmp(result, "timeout") == 0) {
-			state->awaiting_drawer_open = false;
-			state->drawer_open_slot = -1;
+			/* Deliberately does NOT touch awaiting_drawer_open/drawer_open_slot
+			 * here. Those are a single shared pair, not per-slot, so clearing
+			 * them on any failure would also wipe out a genuinely still-pending
+			 * drawer-open wait for a completely different station that
+			 * dispensed successfully earlier. This slot's own result is
+			 * already correctly "fail"/"timeout" via last_ack_result above,
+			 * nothing else needs clearing for it. */
 			audio_enqueue_event(AUDIO_EVENT_FAILURE);
 			led_enqueue_event(LED_EVENT_FAILURE, ack_slot);
 		}
@@ -342,7 +380,18 @@ static void bridge_apply_field(pico_bridge_state_t *state, pill_slot_state_t *sl
 	} else if (strcmp(key, "slot") == 0) {
 		state->active_profile_slot = atoi(value);
 	} else if (strcmp(key, "left") == 0) {
-		slot_state->pills_left = atoi(value);
+		/* Edge-triggered, not level-triggered: only fires the instant the
+		 * count actually crosses into 1 or 0, comparing against whatever it
+		 * was a moment ago. That way repeated STATUS lines while sitting at
+		 * the same low count don't spam duplicate alerts, and a refill
+		 * (pills_left jumping back up) naturally re-arms both alerts for
+		 * the next time it runs low, no separate "already warned" flag to
+		 * remember and reset. */
+		int old_left = slot_state->pills_left;
+		int new_left = atoi(value);
+
+		slot_state->pills_left = new_left;
+		notify_check_pill_level(slot_state->slot_number, slot_state->medication_name, old_left, new_left);
 	} else if (strcmp(key, "dose") == 0) {
 		slot_state->pills_per_dose = atoi(value);
 	} else if (strcmp(key, "doses") == 0) {
@@ -507,7 +556,7 @@ static void bridge_check_schedule_locked(pico_bridge_state_t *state)
 
 			if (screen_parse_hhmm(token, &event_minutes) &&
 			    event_minutes == current_minutes) {
-				if (bridge_enqueue_dispense_slot_locked(state, si)) {
+				if (bridge_enqueue_dispense_slot_locked(state, si, true)) {
 					last_fired_minute[si] = now_minute;
 					ESP_LOGI(TAG,
 						 "Schedule: queued auto-dispense slot %d at %02d:%02d",
@@ -584,9 +633,26 @@ static void uart_bridge_task(void *arg)
 		/* Heartbeat: re-send SET_TIME periodically so the Pico's ACK keeps
 		 * "connected" accurate between real events (see
 		 * UART_BRIDGE_HEARTBEAT_INTERVAL_US for why). Harmless no-op on the
-		 * Pico side if the epoch hasn't meaningfully changed. */
+		 * Pico side if the epoch hasn't meaningfully changed.
+		 *
+		 * Skipped entirely while a dispense is in flight (awaiting_dispense_ack).
+		 * The Pico's sensor-based dispense retry loop blocks its whole superloop
+		 * for up to ~34s and never services UART during that window, so anything
+		 * sent while it's busy just sits in its small hardware RX FIFO until it
+		 * frees up, and can get dropped outright if a later command overflows
+		 * that FIFO before the Pico gets back around to reading it. last_heartbeat_us
+		 * is deliberately left untouched while suppressed, so the moment the
+		 * dispense finishes and awaiting_dispense_ack clears, the overdue check
+		 * below fires right away instead of waiting out the rest of the interval. */
 		int64_t now_us = esp_timer_get_time();
-		if (now_us - last_heartbeat_us >= UART_BRIDGE_HEARTBEAT_INTERVAL_US) {
+		bool dispense_in_flight = false;
+
+		if (xSemaphoreTake(bridge_state_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+			dispense_in_flight = bridge_state.awaiting_dispense_ack;
+			xSemaphoreGive(bridge_state_mutex);
+		}
+
+		if (!dispense_in_flight && now_us - last_heartbeat_us >= UART_BRIDGE_HEARTBEAT_INTERVAL_US) {
 			bridge_send_set_time();
 			last_heartbeat_us = now_us;
 		}
@@ -643,6 +709,12 @@ void start_uart_bridge(void)
 		return;
 	}
 
+	s_uart_tx_mutex = xSemaphoreCreateMutex();
+	if (s_uart_tx_mutex == NULL) {
+		ESP_LOGE(TAG, "Failed to create UART TX mutex");
+		return;
+	}
+
 	if (!bridge_state_load_from_nvs(&bridge_state)) {
 		bridge_state_reset_defaults(&bridge_state);
 		bridge_state_save_to_nvs(&bridge_state);
@@ -654,6 +726,7 @@ void start_uart_bridge(void)
 		/* Dispense-ack state is transient. Never restore it across reboots.
 		 * The old deadline_us would be stale and the timeout would never fire. */
 		bridge_state.awaiting_dispense_ack = false;
+		bridge_state.active_dispense_is_scheduled = false;
 		bridge_state.awaiting_drawer_open = false;
 		bridge_state.drawer_open_slot = -1;
 		bridge_state.dispense_ack_deadline_us = 0;

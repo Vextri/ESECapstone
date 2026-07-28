@@ -4,6 +4,7 @@
 
 #include "audio_feedback.h"
 #include "captive_dns.h"
+#include "debug_log.h"
 #include "drawer_sensor.h"
 #include "lcd_display.h"
 #include "led_feedback.h"
@@ -26,11 +27,16 @@
  *   wifi_ap         - Wi-Fi access point + home Wi-Fi/NTP client
  *   captive_dns     - captive-portal DNS responder
  *   web_server      - HTTP dashboard + JSON API
+ *   debug_log       - in-RAM log capture, readable over WiFi at /api/debug-log
  */
 
 void app_main(void)
 {
-	esp_err_t ret = nvs_flash_init();
+	esp_err_t ret;
+
+	debug_log_init(); /* first, so nothing that follows gets missed */
+
+	ret = nvs_flash_init();
 	if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
 		ESP_ERROR_CHECK(nvs_flash_erase());
 		ret = nvs_flash_init();

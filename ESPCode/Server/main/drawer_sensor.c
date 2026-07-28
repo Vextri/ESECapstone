@@ -31,11 +31,15 @@ static void drawer_sensor_task(void *arg)
 				ESP_LOGI(TAG, "Drawer sensor triggered on GPIO%d", HALL_SIGNAL_PIN);
 				if (bridge_state_mutex != NULL &&
 				    xSemaphoreTake(bridge_state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-					if (bridge_state.awaiting_drawer_open) {
-						bridge_mark_dispense_taken_locked(&bridge_state);
-					} else {
-						ESP_LOGI(TAG, "Drawer opened with no pending dispense pickup");
-					}
+					/* Always attempt this rather than gating on the single
+					 * shared awaiting_drawer_open flag, that flag can be
+					 * cleared by an unrelated station's dispense failing
+					 * (see bridge_handle_ack_line()), which would otherwise
+					 * make a real drawer-open event for a still-pending
+					 * station silently do nothing. bridge_mark_dispense_taken_locked()
+					 * already checks each station's own state and safely
+					 * no-ops if nothing is actually pending. */
+					bridge_mark_dispense_taken_locked(&bridge_state);
 					xSemaphoreGive(bridge_state_mutex);
 				}
 			}
