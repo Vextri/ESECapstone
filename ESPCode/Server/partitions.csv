@@ -1,0 +1,13 @@
+# Name,   Type, SubType, Offset,  Size, Flags
+# Your ESP32-S3 board actually has 16MB of flash (confirmed by the bootloader
+# log: "Detected size(16384k) larger than the size in the binary image
+# header(2048k)"), but the default "Single factory app" table this project
+# started from assumes a 2MB chip and only gives the app 1MB. That 1MB was
+# the real ceiling causing "out of storage" -- not anything about the app
+# itself. This table keeps nvs/phy_init at their original offsets (so
+# existing saved slot profiles in NVS still load correctly) and just gives
+# the factory app room to grow, using a small fraction of the 16MB actually
+# available.
+nvs,      data, nvs,     0x9000,  24K,
+phy_init, data, phy,     0xf000,  4K,
+factory,  app,  factory, 0x10000, 4M,

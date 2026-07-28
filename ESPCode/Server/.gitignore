@@ -71,6 +71,12 @@ Thumbs.db
 ehthumbs.db
 Desktop.ini
 
+# Real Wi-Fi credentials for STA/NTP mode (copy from wifi_credentials.example.h)
+main/wifi_credentials.h
+
+# Real ntfy.sh topic for push notifications (copy from ntfy_credentials.example.h)
+main/ntfy_credentials.h
+
 # User-specific configuration files
 *.user
 *.workspace # General workspace files, can be from various tools

@@ -13,6 +13,7 @@
 
 #include "audio_feedback.h"
 #include "led_feedback.h"
+#include "notify.h"
 #include "time_utils.h"
 
 static const char *TAG = "time_server";
@@ -71,6 +72,10 @@ static void bridge_start_dispense_locked(pico_bridge_state_t *state, int slot_nu
 	bridge_send_dispense_for_slot(slot_number);
 	state->active_profile_slot = slot_number;
 	state->awaiting_dispense_ack = true;
+	/* A fresh dispense supersedes any earlier drawer-open wait (e.g. this
+	 * slot's previous dispense was never picked up before a new one fired). */
+	state->awaiting_drawer_open = false;
+	state->drawer_open_slot = -1;
 	state->dispense_ack_deadline_us = esp_timer_get_time() + DISPENSE_ACK_TIMEOUT_US;
 	bridge_copy_string(state->last_ack_action, sizeof(state->last_ack_action), "DISPENSE");
 	bridge_copy_string(state->last_ack_result, sizeof(state->last_ack_result), "pending");
@@ -182,6 +187,16 @@ static int bridge_extract_slot_number(const char *line)
 	return -1;
 }
 
+/* Marks the bridge as connected, since any recognized line at all (BOOT_SYNC,
+ * STATUS, or ACK) is proof the Pico is alive and talking, not just STATUS
+ * specifically. Caller must hold bridge_state_mutex. */
+static void bridge_mark_link_alive_locked(pico_bridge_state_t *state)
+{
+	state->last_update_us = esp_timer_get_time();
+	state->connected = true;
+	bridge_copy_string(state->controller_transport, sizeof(state->controller_transport), "UART linked");
+}
+
 static void bridge_handle_ack_line(pico_bridge_state_t *state, const char *line)
 {
 	char line_copy[UART_BRIDGE_LINE_SIZE];
@@ -213,12 +228,43 @@ static void bridge_handle_ack_line(pico_bridge_state_t *state, const char *line)
 	bridge_copy_string(state->last_ack_action, sizeof(state->last_ack_action), action);
 	bridge_copy_string(state->last_ack_result, sizeof(state->last_ack_result), result);
 	if (strcmp(action, "DISPENSE") == 0) {
+		int dispense_slot = bridge_slot_index_from_number(ack_slot) >= 0 ? ack_slot : state->active_profile_slot;
+
+		if (bridge_slot_index_from_number(dispense_slot) < 0) {
+			dispense_slot = 0;
+		}
+
 		state->awaiting_dispense_ack = false;
 		state->dispense_ack_deadline_us = 0;
 		if (strcmp(result, "ok") == 0) {
+			pill_slot_state_t *slot_state = &state->slots[dispense_slot];
+
+			/* Not confirmed as taken yet. The motor ran, but nobody has
+			 * necessarily opened the drawer. bridge_mark_dispense_taken_locked()
+			 * (called from drawer_sensor.c) finishes this once the hall
+			 * sensor confirms pickup. */
+			state->awaiting_drawer_open = true;
+			state->drawer_open_slot = dispense_slot;
+			state->active_profile_slot = dispense_slot;
+			bridge_copy_string(slot_state->last_dispense_result,
+					   sizeof(slot_state->last_dispense_result), "pending");
+			bridge_copy_string(slot_state->last_event, sizeof(slot_state->last_event),
+					   "Dispensed. Waiting for drawer-open confirmation.");
+
+			/* Immediate "pill dispensed" alert, the moment the Pico confirms the
+			 * motor/sensors succeeded, same instant on the LCD and the dashboard.
+			 * The separate "taken" alert still fires later, only once the drawer
+			 * sensor confirms pickup (see bridge_mark_dispense_taken_locked()). */
 			audio_enqueue_event(AUDIO_EVENT_SUCCESS);
-			led_enqueue_event(LED_EVENT_SUCCESS, ack_slot);
+			led_enqueue_event(LED_EVENT_SUCCESS, dispense_slot);
+
+			notify_schedule_dispense_reminder(dispense_slot, slot_state->medication_name, time(NULL));
+
+			ESP_LOGI(TAG, "Dispense for slot %d acknowledged. Waiting for hall trigger to mark taken.",
+				 dispense_slot);
 		} else if (strcmp(result, "fail") == 0 || strcmp(result, "timeout") == 0) {
+			state->awaiting_drawer_open = false;
+			state->drawer_open_slot = -1;
 			audio_enqueue_event(AUDIO_EVENT_FAILURE);
 			led_enqueue_event(LED_EVENT_FAILURE, ack_slot);
 		}
@@ -312,7 +358,15 @@ static void bridge_apply_field(pico_bridge_state_t *state, pill_slot_state_t *sl
 	} else if (strcmp(key, "notes") == 0) {
 		bridge_copy_string(slot_state->notes, sizeof(slot_state->notes), value);
 	} else if (strcmp(key, "result") == 0) {
-		bridge_copy_string(slot_state->last_dispense_result, sizeof(slot_state->last_dispense_result), value);
+		/* Don't let a STATUS line's "ok" jump ahead of the drawer-open
+		 * confirmation this slot is still waiting on. */
+		if (state->awaiting_drawer_open && state->drawer_open_slot == slot_state->slot_number &&
+		    strcmp(value, "ok") == 0) {
+			bridge_copy_string(slot_state->last_dispense_result,
+					   sizeof(slot_state->last_dispense_result), "pending");
+		} else {
+			bridge_copy_string(slot_state->last_dispense_result, sizeof(slot_state->last_dispense_result), value);
+		}
 	} else if (strcmp(key, "schedule") == 0) {
 		bridge_copy_string(slot_state->schedule, sizeof(slot_state->schedule), value);
 	}
@@ -355,11 +409,7 @@ static void bridge_handle_status_line(pico_bridge_state_t *state, const char *li
 	}
 
 	slot_state->has_data = true;
-	state->last_update_us = esp_timer_get_time();
-	state->connected = true;
-	bridge_copy_string(state->controller_transport,
-				   sizeof(state->controller_transport),
-				   "UART linked");
+	bridge_mark_link_alive_locked(state);
 	bridge_log_status_locked(state, slot_state);
 	bridge_state_save_to_nvs(state);
 
@@ -395,10 +445,12 @@ static void bridge_process_uart_line(char *line)
 
 	if (strcmp(raw_line, "BOOT_SYNC") == 0) {
 		bridge_handle_boot_sync_line(&bridge_state, line);
+		bridge_mark_link_alive_locked(&bridge_state);
 	} else if (strcmp(raw_line, "STATUS") == 0) {
 		bridge_handle_status_line(&bridge_state, line);
 	} else if (strcmp(raw_line, "ACK") == 0) {
 		bridge_handle_ack_line(&bridge_state, line);
+		bridge_mark_link_alive_locked(&bridge_state);
 	} else {
 		ESP_LOGI(TAG, "UART RX: %s", line);
 	}
@@ -441,7 +493,7 @@ static void bridge_check_schedule_locked(pico_bridge_state_t *state)
 		}
 
 		if (slot->pills_left == 0) {
-			continue; /* empty — skip */
+			continue; /* empty, skip */
 		}
 
 		if (last_fired_minute[si] == now_minute) {
@@ -480,6 +532,8 @@ static void uart_bridge_task(void *arg)
 	size_t line_length = 0;
 	uint8_t rx_buffer[64];
 	bool discarding_line = false;
+	int64_t last_heartbeat_us = 0;
+	int64_t last_status_print_us = 0;
 
 	(void)arg;
 
@@ -526,6 +580,49 @@ static void uart_bridge_task(void *arg)
 			bridge_check_schedule_locked(&bridge_state);
 			xSemaphoreGive(bridge_state_mutex);
 		}
+
+		/* Heartbeat: re-send SET_TIME periodically so the Pico's ACK keeps
+		 * "connected" accurate between real events (see
+		 * UART_BRIDGE_HEARTBEAT_INTERVAL_US for why). Harmless no-op on the
+		 * Pico side if the epoch hasn't meaningfully changed. */
+		int64_t now_us = esp_timer_get_time();
+		if (now_us - last_heartbeat_us >= UART_BRIDGE_HEARTBEAT_INTERVAL_US) {
+			bridge_send_set_time();
+			last_heartbeat_us = now_us;
+		}
+
+		/* Clear, unambiguous link status, separate from the scrolling
+		 * per-message protocol logs, so it's obvious at a glance whether
+		 * the Pico is actually connected right now, not just inferred from
+		 * reading individual UART TX/RX lines. */
+		if (now_us - last_status_print_us >= UART_BRIDGE_STATUS_PRINT_INTERVAL_US) {
+			bool connected_snapshot = false;
+			int64_t last_update_snapshot = 0;
+
+			if (xSemaphoreTake(bridge_state_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+				connected_snapshot = bridge_state.connected;
+				last_update_snapshot = bridge_state.last_update_us;
+				xSemaphoreGive(bridge_state_mutex);
+			}
+
+			if (connected_snapshot) {
+				int64_t age_sec = (now_us - last_update_snapshot) / 1000000;
+				ESP_LOGI(TAG,
+					 "[LINK] ESP <-> Pico: CONNECTED (last heard %llds ago) | this board's UART1 pins: TX=GPIO%d RX=GPIO%d @%dbaud",
+					 (long long)age_sec, UART_BRIDGE_TX_PIN, UART_BRIDGE_RX_PIN, UART_BRIDGE_BAUD);
+			} else if (last_update_snapshot > 0) {
+				int64_t age_sec = (now_us - last_update_snapshot) / 1000000;
+				ESP_LOGW(TAG,
+					 "[LINK] ESP <-> Pico: NOT CONNECTED (last heard %llds ago, times out after %llds) | this board's UART1 pins: TX=GPIO%d RX=GPIO%d @%dbaud",
+					 (long long)age_sec, (long long)(UART_BRIDGE_TIMEOUT_US / 1000000),
+					 UART_BRIDGE_TX_PIN, UART_BRIDGE_RX_PIN, UART_BRIDGE_BAUD);
+			} else {
+				ESP_LOGW(TAG,
+					 "[LINK] ESP <-> Pico: NOT CONNECTED (never heard from it since boot) | this board's UART1 pins: TX=GPIO%d RX=GPIO%d @%dbaud",
+					 UART_BRIDGE_TX_PIN, UART_BRIDGE_RX_PIN, UART_BRIDGE_BAUD);
+			}
+			last_status_print_us = now_us;
+		}
 	}
 }
 
@@ -554,9 +651,11 @@ void start_uart_bridge(void)
 
 		bridge_state.connected = false;
 		bridge_state.last_update_us = 0;
-		/* Dispense-ack state is transient — never restore it across reboots.
+		/* Dispense-ack state is transient. Never restore it across reboots.
 		 * The old deadline_us would be stale and the timeout would never fire. */
 		bridge_state.awaiting_dispense_ack = false;
+		bridge_state.awaiting_drawer_open = false;
+		bridge_state.drawer_open_slot = -1;
 		bridge_state.dispense_ack_deadline_us = 0;
 		bridge_copy_string(bridge_state.controller_transport,
 					   sizeof(bridge_state.controller_transport),

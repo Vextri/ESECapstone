@@ -19,6 +19,9 @@ static const char *TAG = "time_server";
 #define LED_EDIT_R 140
 #define LED_EDIT_G 0
 #define LED_EDIT_B 180
+#define LED_SELECT_R 0
+#define LED_SELECT_G 0
+#define LED_SELECT_B 255
 
 typedef struct {
 	led_event_t event;
@@ -88,7 +91,7 @@ static void led_set_all(uint8_t r, uint8_t g, uint8_t b)
 	led_ws2812_show();
 }
 
-static void led_apply_base_state(bool edit_active, int edit_slot)
+static void led_apply_base_state(bool edit_active, int edit_slot, bool slot_selected, int selected_slot)
 {
 	if (edit_active) {
 		int led_idx = led_index_from_slot(edit_slot);
@@ -97,6 +100,15 @@ static void led_apply_base_state(bool edit_active, int edit_slot)
 			led_pixels[led_idx].r = LED_EDIT_R;
 			led_pixels[led_idx].g = LED_EDIT_G;
 			led_pixels[led_idx].b = LED_EDIT_B;
+			led_ws2812_show();
+		}
+	} else if (slot_selected) {
+		int led_idx = led_index_from_slot(selected_slot);
+		led_set_all(0, 0, 0);
+		if (led_idx >= 0) {
+			led_pixels[led_idx].r = LED_SELECT_R;
+			led_pixels[led_idx].g = LED_SELECT_G;
+			led_pixels[led_idx].b = LED_SELECT_B;
 			led_ws2812_show();
 		}
 	} else {
@@ -136,8 +148,10 @@ static void led_task(void *arg)
 	(void)arg;
 	bool edit_active = false;
 	int edit_slot = -1;
+	bool slot_selected = false;
+	int selected_slot = -1;
 
-	led_apply_base_state(false, edit_slot);
+	led_apply_base_state(false, edit_slot, slot_selected, selected_slot);
 
 	while (1) {
 		if (xQueueReceive(led_event_queue, &msg, portMAX_DELAY) != pdTRUE) {
@@ -145,8 +159,12 @@ static void led_task(void *arg)
 		}
 
 		if (msg.event == LED_EVENT_SUCCESS) {
+			slot_selected = false;
+			selected_slot = -1;
 			led_flash_sequence(0, 255, 0, 3);
 		} else if (msg.event == LED_EVENT_FAILURE) {
+			slot_selected = false;
+			selected_slot = -1;
 			led_flash_sequence(255, 0, 0, 3);
 		} else if (msg.event == LED_EVENT_EDIT_BEGIN) {
 			edit_active = true;
@@ -154,9 +172,15 @@ static void led_task(void *arg)
 		} else if (msg.event == LED_EVENT_EDIT_END) {
 			edit_active = false;
 			edit_slot = -1;
+		} else if (msg.event == LED_EVENT_SLOT_SELECT) {
+			slot_selected = true;
+			selected_slot = msg.slot;
+		} else if (msg.event == LED_EVENT_SLOT_CLEAR) {
+			slot_selected = false;
+			selected_slot = -1;
 		}
 
-		led_apply_base_state(edit_active, edit_slot);
+		led_apply_base_state(edit_active, edit_slot, slot_selected, selected_slot);
 	}
 }
 

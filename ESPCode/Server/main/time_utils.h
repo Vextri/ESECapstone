@@ -11,6 +11,16 @@
 extern "C" {
 #endif
 
+/* Sets the ESP's local timezone to US Eastern (EST5EDT, with the standard
+ * US daylight-saving rule: 2nd Sunday of March to 1st Sunday of November),
+ * matching the DST logic already hardcoded on the Pico side (pico_rtc.c).
+ * Must be called once at boot, before any code reads the clock, NTP and
+ * manual sync both set the system clock to UTC, and every localtime_r()
+ * call in this firmware (dashboard "Device Time", the LCD clock, and the
+ * schedule-matching logic that decides when to auto-fire a dispense) is
+ * meaningless without this. */
+void time_utils_init(void);
+
 /* Parses a schedule token like "08:00", "8:00am", or "20" (hour-only) into
  * minutes-since-midnight. Returns false if the token isn't a valid time. */
 bool screen_parse_hhmm(const char *token, int *minutes_out);

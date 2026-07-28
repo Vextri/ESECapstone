@@ -140,13 +140,13 @@ void bridge_state_reset_defaults(pico_bridge_state_t *state)
 	for (slot_index = 0; slot_index < PILL_SLOT_COUNT; ++slot_index) {
 		bridge_reset_slot_defaults(&state->slots[slot_index], slot_index);
 	}
-	strcpy(state->slots[0].last_event, "ESP dashboard ready. Waiting for Pico 2 data link.");
-	strcpy(state->slots[0].notes, "Expect TIME_REQ, BOOT_SYNC, STATUS, and ACK from Pico over UART.");
 	state->history_count = 0;
 	state->dispense_queue_count = 0;
 	strcpy(state->last_ack_action, "none");
 	strcpy(state->last_ack_result, "none");
 	state->awaiting_dispense_ack = false;
+	state->awaiting_drawer_open = false;
+	state->drawer_open_slot = -1;
 	state->dispense_ack_deadline_us = 0;
 	state->last_update_us = 0;
 }
@@ -179,6 +179,63 @@ void bridge_log_status_locked(pico_bridge_state_t *state, const pill_slot_state_
 				 slot_state->last_event);
 }
 
+void bridge_mark_dispense_taken_locked(pico_bridge_state_t *state)
+{
+	int cleared_count = 0;
+	int last_cleared_slot = -1;
+	time_t now;
+	struct tm timeinfo;
+	char time_buf[64];
+	bool have_time_str;
+
+	if (state == NULL) {
+		return;
+	}
+
+	now = time(NULL);
+	have_time_str = localtime_r(&now, &timeinfo) != NULL &&
+			strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &timeinfo) > 0;
+
+	/* One physical drawer/hall sensor serves every station, so a single
+	 * drawer-open event must confirm every dispense currently pending
+	 * pickup, not just the most recently dispensed one. Previously this
+	 * only cleared whichever single slot was last remembered in
+	 * drawer_open_slot, so dispensing two stations close together left
+	 * the earlier one stuck on "pending" forever, since opening the
+	 * drawer again did nothing once awaiting_drawer_open had already
+	 * been cleared by the first confirmation. */
+	for (int i = 0; i < PILL_SLOT_COUNT; i++) {
+		pill_slot_state_t *slot_state = &state->slots[i];
+
+		if (!slot_state->is_active || strcmp(slot_state->last_dispense_result, "pending") != 0) {
+			continue;
+		}
+
+		bridge_copy_string(slot_state->last_dispensed, sizeof(slot_state->last_dispensed),
+				   have_time_str ? time_buf : "Drawer opened (time unavailable)");
+		bridge_copy_string(slot_state->last_dispense_result, sizeof(slot_state->last_dispense_result), "ok");
+		bridge_copy_string(slot_state->last_event, sizeof(slot_state->last_event),
+				   "Drawer opened after dispense. Pills taken.");
+		bridge_copy_string(slot_state->notes, sizeof(slot_state->notes),
+				   "Hall sensor confirmed drawer open after dispense.");
+
+		bridge_log_status_locked(state, slot_state);
+		last_cleared_slot = i;
+		cleared_count++;
+		ESP_LOGI(TAG, "Dispense confirmed as taken for slot %d by hall trigger", i);
+	}
+
+	state->awaiting_drawer_open = false;
+	state->drawer_open_slot = -1;
+
+	if (cleared_count > 0) {
+		state->active_profile_slot = last_cleared_slot;
+		bridge_state_save_to_nvs(state);
+		audio_enqueue_event(AUDIO_EVENT_SUCCESS);
+		led_enqueue_event(LED_EVENT_SUCCESS, last_cleared_slot);
+	}
+}
+
 void bridge_update_connected_flag_locked(void)
 {
 	int64_t age_us = esp_timer_get_time() - bridge_state.last_update_us;
@@ -188,6 +245,8 @@ void bridge_update_connected_flag_locked(void)
 		esp_timer_get_time() > bridge_state.dispense_ack_deadline_us) {
 		pill_slot_state_t *timed_out_slot = &bridge_state.slots[bridge_state.active_profile_slot];
 		bridge_state.awaiting_dispense_ack = false;
+		bridge_state.awaiting_drawer_open = false;
+		bridge_state.drawer_open_slot = -1;
 		bridge_state.dispense_ack_deadline_us = 0;
 		bridge_copy_string(bridge_state.last_ack_result,
 				   sizeof(bridge_state.last_ack_result),

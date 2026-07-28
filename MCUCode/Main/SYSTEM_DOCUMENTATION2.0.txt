@@ -242,8 +242,8 @@ Boot behaviour:
 Physical interface:
   UART:       uart1 (hardware UART, NOT the USB serial port)
   Baud:       115 200 8N1, no flow control
-  Pico TX:    GPIO 20 -> ESP RX
-  Pico RX:    GPIO 21 -> ESP TX
+  Pico TX:    GPIO 21 -> ESP RX
+  Pico RX:    GPIO 20 -> ESP TX
   Line end:   \n (also accepts \r\n from ESP)
   Max line:   255 bytes (longer lines silently discarded)
 

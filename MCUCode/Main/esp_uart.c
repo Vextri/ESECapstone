@@ -5,6 +5,7 @@
 #include "esp_uart.h"
 #include "pill_dispenser.h"
 #include "pico_rtc.h"
+#include "pico/stdlib.h"      // time_us_64()
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -13,6 +14,10 @@
 
 static char rx_buf[RX_BUF_SIZE];
 static int  rx_pos = 0;
+
+// Tracks the last time a genuinely CMD|-formatted line arrived from the ESP,
+// purely for the periodic [LINK] status print below. 0 means "never".
+static uint64_t s_last_esp_line_us = 0;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -175,6 +180,8 @@ static void dispatch_command(char *line) {
         return;
     }
 
+    s_last_esp_line_us = time_us_64();
+
     char action[32] = {0};
     if (!get_field(line, "action", action, sizeof(action))) {
         printf("[ESP CMD] No action field in: %s\n", line);
@@ -193,6 +200,48 @@ static void dispatch_command(char *line) {
 }
 
 // ---------------------------------------------------------------------------
+// Link status
+// ---------------------------------------------------------------------------
+
+/**
+ * Prints a clear "[LINK] Pico <-> ESP: CONNECTED/NOT CONNECTED" line to the
+ * terminal every ~10 seconds, based on how recently a valid CMD| line
+ * arrived from the ESP. Self-throttled, cheap to call every loop iteration.
+ */
+static void print_link_status_if_due(void) {
+    static uint64_t s_last_print_us = 0;
+    const uint64_t print_interval_us = 10000000ULL; // 10s
+    const uint64_t timeout_us = 180000000ULL;       // 3 minutes, matches the ESP side's own timeout
+
+    uint64_t now_us = time_us_64();
+    if (now_us - s_last_print_us < print_interval_us) {
+        return;
+    }
+    s_last_print_us = now_us;
+
+    if (s_last_esp_line_us == 0) {
+        printf("[LINK] Pico <-> ESP: NOT CONNECTED (never heard from it since boot) | "
+               "this board's UART1 pins: TX=GPIO%d RX=GPIO%d @%dbaud\n",
+               ESP_UART_TX_PIN, ESP_UART_RX_PIN, ESP_UART_BAUD);
+        return;
+    }
+
+    uint64_t age_us = now_us - s_last_esp_line_us;
+    unsigned long age_sec = (unsigned long)(age_us / 1000000ULL);
+
+    if (age_us < timeout_us) {
+        printf("[LINK] Pico <-> ESP: CONNECTED (last heard %lus ago) | "
+               "this board's UART1 pins: TX=GPIO%d RX=GPIO%d @%dbaud\n",
+               age_sec, ESP_UART_TX_PIN, ESP_UART_RX_PIN, ESP_UART_BAUD);
+    } else {
+        printf("[LINK] Pico <-> ESP: NOT CONNECTED (last heard %lus ago, times out after %lus) | "
+               "this board's UART1 pins: TX=GPIO%d RX=GPIO%d @%dbaud\n",
+               age_sec, (unsigned long)(timeout_us / 1000000ULL),
+               ESP_UART_TX_PIN, ESP_UART_RX_PIN, ESP_UART_BAUD);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -201,6 +250,8 @@ void esp_uart_inject_line(char *line) {
 }
 
 void esp_uart_poll(void) {
+    print_link_status_if_due();
+
     while (uart_is_readable(ESP_UART)) {
         char c = (char)uart_getc(ESP_UART);
 

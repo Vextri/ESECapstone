@@ -10,6 +10,18 @@
 
 static const char *TAG = "time_server";
 
+void time_utils_init(void)
+{
+	/* POSIX TZ format: STD offset DST[,rule]. EST5EDT = Eastern Standard is
+	 * 5 hours behind UTC, Eastern Daylight is 1 hour ahead of that. The rule
+	 * after the comma is "spring forward on the 2nd Sunday of March at 2am,
+	 * fall back on the 1st Sunday of November at 2am", the same US DST
+	 * rule already hardcoded in the Pico's pico_rtc.c eastern_offset(). */
+	setenv("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2", 1);
+	tzset();
+	ESP_LOGI(TAG, "Timezone set to US Eastern (EST5EDT)");
+}
+
 bool screen_parse_hhmm(const char *token, int *minutes_out)
 {
 	char local[24];
@@ -116,6 +128,7 @@ void screen_get_next_dispense_string(const pico_bridge_state_t *snapshot, char *
 	int current_minutes;
 	int best_delta = (24 * 60) + 1;
 	int best_minutes = -1;
+	bool best_is_tomorrow = false;
 	int best_slots[PILL_SLOT_COUNT];
 	int best_count = 0;
 
@@ -154,6 +167,7 @@ void screen_get_next_dispense_string(const pico_bridge_state_t *snapshot, char *
 				if (delta < best_delta) {
 					best_delta = delta;
 					best_minutes = event_minutes;
+					best_is_tomorrow = (event_minutes < current_minutes);
 					best_count = 1;
 					best_slots[0] = si;
 				} else if (delta == best_delta && best_count < PILL_SLOT_COUNT) {
@@ -192,12 +206,22 @@ void screen_get_next_dispense_string(const pico_bridge_state_t *snapshot, char *
 			used += (size_t)written;
 		}
 
-		snprintf(out,
-			 out_len,
-			 "%02d:%02d FOR %s",
-			 best_minutes / 60,
-			 best_minutes % 60,
-			 slots_buf);
+		{
+			int hour24 = best_minutes / 60;
+			int minute = best_minutes % 60;
+			int hour12 = hour24 % 12;
+			const char *ampm = (hour24 < 12) ? "AM" : "PM";
+
+			if (hour12 == 0) {
+				hour12 = 12;
+			}
+
+			if (best_is_tomorrow) {
+				snprintf(out, out_len, "%d:%02d %s TMRW FOR %s", hour12, minute, ampm, slots_buf);
+			} else {
+				snprintf(out, out_len, "%d:%02d %s FOR %s", hour12, minute, ampm, slots_buf);
+			}
+		}
 	}
 	return;
 }

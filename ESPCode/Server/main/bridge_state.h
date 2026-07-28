@@ -12,7 +12,9 @@
 extern "C" {
 #endif
 
-#define PILL_SLOT_COUNT 5
+/* Matches the dispenser's 3 physical carousel positions (see the Pico's
+ * MAX_PROFILES in pill_dispenser.h, which must stay in sync with this). */
+#define PILL_SLOT_COUNT 3
 #define DISPENSE_HISTORY_COUNT 16
 #define LOW_PILL_THRESHOLD 5
 
@@ -52,6 +54,12 @@ typedef struct {
 	char last_ack_action[32];
 	char last_ack_result[32];
 	bool awaiting_dispense_ack;
+	/* Set once the Pico ACKs a dispense as "ok". Pickup isn't considered
+	 * confirmed until the drawer's hall sensor triggers (see
+	 * drawer_sensor.c) and calls bridge_mark_dispense_taken_locked(), which
+	 * clears this. */
+	bool awaiting_drawer_open;
+	int drawer_open_slot;
 	int64_t dispense_ack_deadline_us;
 	int64_t last_update_us;
 	int dispense_queue[PILL_SLOT_COUNT];
@@ -75,6 +83,15 @@ void bridge_state_reset_defaults(pico_bridge_state_t *state);
 /* Appends a dispense-history entry for slot_state. Caller must hold
  * bridge_state_mutex. */
 void bridge_log_status_locked(pico_bridge_state_t *state, const pill_slot_state_t *slot_state);
+
+/* Confirms every currently-pending dispense as picked up (drawer opened),
+ * called from drawer_sensor.c when the hall sensor triggers while
+ * awaiting_drawer_open is true. One physical drawer serves every station,
+ * so this clears *all* slots whose last_dispense_result is "pending", not
+ * just one, marks each "ok", clears the awaiting_drawer_open wait, logs
+ * history, and plays success feedback once. Caller must hold
+ * bridge_state_mutex. */
+void bridge_mark_dispense_taken_locked(pico_bridge_state_t *state);
 
 /* Refreshes bridge_state.connected based on last_update_us, and resolves a
  * timed-out dispense ack if the deadline has passed. Caller must hold

@@ -307,7 +307,7 @@ int main() {
                     printf("Motor 1 stop (steps: %lu)\n", stepper_get_step_count(STEPPER_MOTOR_1));
                     stepper_stop(STEPPER_MOTOR_1);
                     break;
-
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                
                 // Motor 2 manual control
                 case 'a':
                 case 'A':
@@ -361,6 +361,9 @@ int main() {
         
         // Poll ESP UART for incoming commands
         esp_uart_poll();
+
+        // Retry TIME_REQ every 15s until the clock is set (no-op once it is)
+        rtc_request_from_esp_if_needed();
 
         // Advance stepper motor one half-step if due
         stepper_task();

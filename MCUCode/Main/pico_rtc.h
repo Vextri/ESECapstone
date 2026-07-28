@@ -64,4 +64,12 @@ uint32_t rtc_parse_datetime_str(const char *str);
  */
 void rtc_request_from_esp(void);
 
+/**
+ * Calls rtc_request_from_esp() once, then automatically retries every 15
+ * seconds until rtc_is_set() becomes true, at which point it stops sending
+ * anything. Self-throttling -- safe and cheap to call every main loop
+ * iteration.
+ */
+void rtc_request_from_esp_if_needed(void);
+
 #endif // PICO_RTC_H

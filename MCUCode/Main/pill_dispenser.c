@@ -23,6 +23,26 @@ static uint8_t slot_to_motor(int8_t slot) {
     return (uint8_t)slot;
 }
 
+static bool any_piezo_triggered(void) {
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        if (piezo_get_count_slot(slot) > 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static int8_t first_piezo_triggered_slot(void) {
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        if (piezo_get_count_slot(slot) > 0) {
+            return (int8_t)slot;
+        }
+    }
+
+    return -1;
+}
+
 static void format_status_timestamp(char *buffer, size_t buffer_size) {
     uint32_t uptime_seconds = to_ms_since_boot(get_absolute_time()) / 1000;
     uint32_t hours = uptime_seconds / 3600;
@@ -391,7 +411,11 @@ bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms, uint8_t mo
            motor_idx + 1, timeout_ms);
 
     // Ensure piezo and IR are enabled for this slot; hall effect is shared
-    if (!piezo_is_enabled_slot(motor_idx)) piezo_enable_slot(motor_idx);
+    for (uint8_t slot = 0; slot < SENSOR_SLOT_COUNT; slot++) {
+        if (!piezo_is_enabled_slot(slot)) {
+            piezo_enable_slot(slot);
+        }
+    }
     if (!ir_is_enabled_slot(motor_idx)) ir_enable_slot(motor_idx);
     if (!hall_effect_is_enabled()) hall_effect_enable();
 
@@ -412,29 +436,48 @@ bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms, uint8_t mo
         }
 
         // Reset counts before each attempt so only new events count
-        piezo_reset_count_slot(motor_idx);
+        sensor_interrupts_reset_all();
         ir_reset_count_slot(motor_idx);
         hall_effect_reset_count();
 
         uint32_t start_time = to_ms_since_boot(get_absolute_time());
+        bool piezo_seen = false;
+        bool ir_seen = false;
 
         // Start stepper - piezo will stop it when pill impact is detected
         printf("Motor %d starting (attempt %d)...\n", motor_idx + 1, attempt);
         stepper_set_direction(motor_idx, STEPPER_FORWARD);
 
-        // Wait for piezo to detect pill impact
+        // Wait for both sensors to confirm the pill.
+        // The pill may pass the IR beam before the piezo fires, so either order is valid.
         while (true) {
             uint32_t now = to_ms_since_boot(get_absolute_time());
             if (now - start_time > timeout_ms) {
-                printf("TIMEOUT: Piezo did not trigger within %dms (attempt %d/%d)\n",
+                printf("TIMEOUT: Sensors did not confirm pill within %dms (attempt %d/%d)\n",
                        timeout_ms, attempt, MAX_RETRIES);
                 stepper_stop(motor_idx);
                 break;  // Treat as failed attempt, retry up to MAX_RETRIES
             }
 
-            if (piezo_get_count_slot(motor_idx) > 0) {
+            if (!piezo_seen && any_piezo_triggered()) {
+                piezo_seen = true;
                 stepper_stop(motor_idx);
-                printf("Pill impact detected - Motor %d stopped.\n", motor_idx + 1);
+                int8_t piezo_slot = first_piezo_triggered_slot();
+                if (piezo_slot >= 0) {
+                    printf("Pill impact detected by piezo slot %d - Motor %d stopped.\n",
+                           piezo_slot, motor_idx + 1);
+                } else {
+                    printf("Pill impact detected by piezo sensor - Motor %d stopped.\n",
+                           motor_idx + 1);
+                }
+            }
+
+            if (!ir_seen && ir_get_count_slot(motor_idx) > 0) {
+                ir_seen = true;
+                printf("Pill passed IR beam on Motor %d.\n", motor_idx + 1);
+            }
+
+            if (piezo_seen && ir_seen) {
                 break;
             }
 
@@ -449,18 +492,19 @@ bool dispenser_dispense_single_pill_sensor_based(uint32_t timeout_ms, uint8_t mo
         uint32_t hall_triggers = hall_effect_get_count();
         printf("Hall effect triggers for this pill: %lu\n", (unsigned long)hall_triggers);
 
-        // IR confirms pill passed through chute
-        bool ir_ok = ir_get_count_slot(motor_idx) > 0;
+         // IR confirms pill passed through chute
+         bool ir_ok = ir_seen || (ir_get_count_slot(motor_idx) > 0);
 
-        printf("Pill check: Piezo=TRIGGERED | IR=%s\n",
-               ir_ok ? "TRIGGERED" : "NO SIGNAL");
+         printf("Pill check: Piezo=%s | IR=%s\n",
+             piezo_seen ? "TRIGGERED" : "NO SIGNAL",
+             ir_ok ? "TRIGGERED" : "NO SIGNAL");
 
-        if (ir_ok) {
+         if (piezo_seen && ir_ok) {
             printf("SUCCESS: Pill confirmed dispensed!\n");
             return true;
         }
 
-        printf("WARNING: IR did not confirm pill - retrying...\n");
+         printf("WARNING: Pill was not confirmed by both sensors - retrying...\n");
     }
 
     printf("ERROR: Pill failed to dispense after %d attempts\n", MAX_RETRIES);

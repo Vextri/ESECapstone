@@ -184,3 +184,18 @@ void rtc_request_from_esp(void) {
     uart_write_blocking(ESP_UART, (const uint8_t *)req, strlen(req));
     printf("[RTC] TIME_REQ sent to ESP — waiting for SET_TIME response\n");
 }
+
+void rtc_request_from_esp_if_needed(void) {
+    static uint64_t s_last_request_us = 0;
+    const uint64_t retry_interval_us = 15000000ULL; // 15s
+
+    if (s_time_set) {
+        return;
+    }
+
+    uint64_t now_us = time_us_64();
+    if (s_last_request_us == 0 || (now_us - s_last_request_us) >= retry_interval_us) {
+        rtc_request_from_esp();
+        s_last_request_us = now_us;
+    }
+}

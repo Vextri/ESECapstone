@@ -10,8 +10,25 @@ extern "C" {
 #endif
 
 /* Bridge is considered disconnected once this many microseconds pass with no
- * STATUS/ACK/BOOT_SYNC line received from the Pico. */
-#define UART_BRIDGE_TIMEOUT_US (5 * 1000000)
+ * STATUS/ACK/BOOT_SYNC line received from the Pico. Paired with the
+ * heartbeat below (which keeps real traffic flowing every ~60s whenever the
+ * Pico is actually alive), so this only needs to survive a couple of missed
+ * heartbeat cycles, not long real-world gaps between dispenses. */
+#define UART_BRIDGE_TIMEOUT_US (3LL * 60 * 1000000)
+
+/* How often the ESP re-sends SET_TIME as a heartbeat, purely to keep the
+ * "connected" status accurate. The Pico has no periodic heartbeat of its
+ * own (it only ever speaks after boot or a dispense), so without this the
+ * dashboard would show "disconnected" during any normal quiet gap between
+ * events, even though the Pico is fine. Re-sending SET_TIME is harmless
+ * (idempotent) and the Pico always ACKs it, which is what actually keeps
+ * the connection status fresh. */
+#define UART_BRIDGE_HEARTBEAT_INTERVAL_US (60LL * 1000000)
+
+/* How often a clear, human-readable "is the Pico actually connected" line
+ * gets printed to the ESP's own serial log, separate from and easier to
+ * spot than the scrolling per-message protocol logs. */
+#define UART_BRIDGE_STATUS_PRINT_INTERVAL_US (10LL * 1000000)
 
 /* How long to wait for an ACK|action=DISPENSE before treating it as a
  * timeout (used by both the UART bridge and the LCD's manual dispense path). */
