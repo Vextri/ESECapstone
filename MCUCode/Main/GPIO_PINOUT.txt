@@ -9,10 +9,11 @@
   GPIO 11  ->  DRV8833 BIN2  (Coil B-)
 
 --- STEPPER MOTOR 2 (Dispenser 2 / Slot 1) ---
-  GPIO  0  ->  DRV8833 AIN1  (Coil A+)
-  GPIO  1  ->  DRV8833 AIN2  (Coil A-)  [formerly DC motor AIN1]
-  GPIO  2  ->  DRV8833 BIN1  (Coil B+)  [formerly DC motor AIN2]
-  GPIO  3  ->  DRV8833 BIN2  (Coil B-)
+  GPIO  6  ->  DRV8833 AIN1  (Coil A+)  [formerly Hall effect pin, retired]
+  GPIO  4  ->  DRV8833 AIN2  (Coil A-)
+  GPIO 27  ->  DRV8833 BIN1  (Coil B+)
+  GPIO 28  ->  DRV8833 BIN2  (Coil B-)
+  (AIN1/AIN2 swapped in software vs. driver IN1/IN2 order to fix direction)
 
 --- STEPPER MOTOR 3 (Dispenser 3 / Slot 2) ---
   GPIO 12  ->  DRV8833 AIN1  (Coil A+)
@@ -27,7 +28,9 @@
   GPIO 17  ->  IR sensor       (Slot 1)
   GPIO 18  ->  Piezo sensor    (Slot 2)
   GPIO 19  ->  IR sensor       (Slot 2)
-  GPIO  6  ->  Hall effect sensor (shared, all slots)
+  GPIO  6  ->  RETIRED (was hall effect sensor, now Motor 2 AIN2). Hall
+               sensors are physically on GP33/34/35 now, not wired into
+               this firmware yet.
 
 --- ESP UART (uart1) ---
   GPIO 21  ->  TX  (Pico -> ESP)
@@ -37,7 +40,7 @@
   SLOT -> MOTOR MAPPING
 ============================================================
   Slot 0  ->  Motor 1  (GPIO  8-11)
-  Slot 1  ->  Motor 2  (GPIO  0-3)
+  Slot 1  ->  Motor 2  (GPIO  4, 6, 27, 28)
   Slot 2  ->  Motor 3  (GPIO 12-15)
   Slot 3  ->  Motor 3  (clamped)
   Slot 4  ->  Motor 3  (clamped)
@@ -45,8 +48,7 @@
 ============================================================
   FREE / UNASSIGNED GPIOs
 ============================================================
-  GPIO  4
   GPIO 22
-  GPIO 26 - 28  (ADC capable)
+  GPIO 26  (ADC capable)
 
 ============================================================

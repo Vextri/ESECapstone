@@ -147,7 +147,6 @@ void gpio_unified_interrupt_handler(uint gpio, uint32_t events) {
         case PIEZO_PIN_SLOT0:  piezo_interrupt_handler(gpio, events, 0); break;
         case PIEZO_PIN_SLOT1:  piezo_interrupt_handler(gpio, events, 1); break;
         case PIEZO_PIN_SLOT2:  piezo_interrupt_handler(gpio, events, 2); break;
-        case HALL_EFFECT_PIN:  hall_effect_interrupt_handler(gpio, events); break;
         case IR_PIN_SLOT0:     ir_interrupt_handler(gpio, events, 0); break;
         case IR_PIN_SLOT1:     ir_interrupt_handler(gpio, events, 1); break;
         case IR_PIN_SLOT2:     ir_interrupt_handler(gpio, events, 2); break;
@@ -171,10 +170,9 @@ void sensor_interrupts_init(void) {
         gpio_pull_up(ir_slot_pins[slot]);  // IR sensor active low (beam broken = LOW)
     }
 
-    // Initialize hall effect sensor pin (shared)
-    gpio_init(HALL_EFFECT_PIN);
-    gpio_set_dir(HALL_EFFECT_PIN, GPIO_IN);
-    gpio_pull_down(HALL_EFFECT_PIN);
+    // Hall effect sensor on GPIO6 is retired: that pin now belongs to the
+    // Motor 2 (Slot 2) stepper driver, see stepper_control.c. Not claimed
+    // here anymore so it's free for stepper_init() to own as an output.
 
     // Register unified callback (SDK only allows one global GPIO handler)
     gpio_set_irq_enabled_with_callback(PIEZO_PIN_SLOT0,
@@ -183,7 +181,6 @@ void sensor_interrupts_init(void) {
     // Enable IRQs for remaining pins (callback already registered above)
     gpio_set_irq_enabled(PIEZO_PIN_SLOT1, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(PIEZO_PIN_SLOT2, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
-    gpio_set_irq_enabled(HALL_EFFECT_PIN, GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(IR_PIN_SLOT0, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(IR_PIN_SLOT1, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
     gpio_set_irq_enabled(IR_PIN_SLOT2, GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL, true);
@@ -211,7 +208,7 @@ void sensor_interrupts_init(void) {
         printf("  Slot %d: Piezo GPIO %d, IR GPIO %d\n",
                slot, piezo_slot_pins[slot], ir_slot_pins[slot]);
     }
-    printf("  Hall effect sensor: GPIO %d\n", HALL_EFFECT_PIN);
+    printf("  Hall effect sensor: retired (GPIO %d now used by Motor 2 stepper)\n", HALL_EFFECT_PIN);
 }
 
 // === SLOT-INDEXED PIEZO FUNCTIONS ===

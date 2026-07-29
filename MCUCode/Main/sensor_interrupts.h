@@ -29,8 +29,11 @@
 #define PIEZO_PIN       PIEZO_PIN_SLOT0
 #define IR_PIN          IR_PIN_SLOT0
 
-// Hall effect sensor (shared across all slots)
-#define HALL_EFFECT_PIN 6       // GPIO pin for hall effect sensor
+// Hall effect sensor: RETIRED. GPIO6 is now the Motor 2 (Slot 2) stepper's
+// AIN2 line, see stepper_control.c. sensor_interrupts_init() no longer
+// claims this pin; the hall_effect_* functions below are inert (no pin is
+// ever driven low or read for them, counts just stay at 0).
+#define HALL_EFFECT_PIN 6       // GPIO pin for hall effect sensor (unused, retired)
 
 // Debounce settings
 #define PIEZO_DEBOUNCE_MS 100   // Debounce time for piezo (vibration settling)

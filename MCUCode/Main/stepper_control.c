@@ -22,8 +22,18 @@ typedef struct {
 
 static const stepper_pin_cfg_t pin_cfg[STEPPER_MOTOR_COUNT] = {
     { 8,  9, 10, 11},  // Motor 1: main dispenser
-    { 0,  1,  2,  3},  // Motor 2: reuses old DC motor GPIOs (GPIO1=AIN1, GPIO2=AIN2)
+    { 6,  4, 27, 28},  // Motor 2: dispenser 2, rewired off a fresh DRV8833.
+                       // AIN1/AIN2 swapped vs. the physical GP4/GP6 wiring
+                       // to reverse coil A's phase, this motor's direction
+                       // was flipped relative to Motor 1/3 on the new driver.
     {12, 13, 14, 15},  // Motor 3: dispenser 3
+};
+
+// Per-motor step delay, see STEPPER_STEP_DELAY_US_MOTOR_1/_2/_3 in the header.
+static const uint32_t step_delay_us[STEPPER_MOTOR_COUNT] = {
+    STEPPER_STEP_DELAY_US_MOTOR_1,
+    STEPPER_STEP_DELAY_US_MOTOR_2,
+    STEPPER_STEP_DELAY_US_MOTOR_3,
 };
 
 // Per-motor runtime state
@@ -105,7 +115,7 @@ void stepper_task(void) {
 
         apply_step(m, motors[m].step_index);
         motors[m].step_count++;
-        motors[m].next_step_time = delayed_by_us(get_absolute_time(), STEPPER_STEP_DELAY_US);
+        motors[m].next_step_time = delayed_by_us(get_absolute_time(), step_delay_us[m]);
     }
 }
 

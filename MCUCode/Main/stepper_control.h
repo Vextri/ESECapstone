@@ -6,7 +6,9 @@
  *
  * Wiring:
  *   Motor 1 (main dispenser): GPIO8=AIN1,  GPIO9=AIN2,  GPIO10=BIN1, GPIO11=BIN2
- *   Motor 2 (dispenser 2):    GPIO0=AIN1,  GPIO1=AIN2,  GPIO2=BIN1,  GPIO3=BIN2
+ *   Motor 2 (dispenser 2):    GPIO6=AIN1,  GPIO4=AIN2,  GPIO27=BIN1, GPIO28=BIN2
+ *     (AIN1/AIN2 swapped in software vs. the driver's physical IN1/IN2 order,
+ *      to correct this motor's direction after rewiring, see stepper_control.c)
  *   Motor 3 (dispenser 3):    GPIO12=AIN1, GPIO13=AIN2, GPIO14=BIN1, GPIO15=BIN2
  */
 
@@ -22,12 +24,14 @@
 
 // Motor index constants
 #define STEPPER_MOTOR_1  0   // Main dispenser: GPIO 8-11
-#define STEPPER_MOTOR_2  1   // Dispenser 2:   GPIO 0-3 (reuses old DC motor pins)
+#define STEPPER_MOTOR_2  1   // Dispenser 2:   GPIO 4, 6, 27, 28
 #define STEPPER_MOTOR_3  2   // Dispenser 3:   GPIO 12-15
 
-// Step timing: microseconds between each full-step
-// 2000us = ~500 full-steps/sec
-#define STEPPER_STEP_DELAY_US 2000
+// Step timing: microseconds between each full-step, per motor (smaller = faster).
+// Indexed the same way as STEPPER_MOTOR_1/_2/_3 above.
+#define STEPPER_STEP_DELAY_US_MOTOR_1 5600   // Slot 1
+#define STEPPER_STEP_DELAY_US_MOTOR_2 5600   // Slot 2
+#define STEPPER_STEP_DELAY_US_MOTOR_3 2000   // Slot 3
 
 // Direction values
 typedef enum {
