@@ -6,6 +6,7 @@
 
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_netif_sntp.h"
 #include "esp_sntp.h"
@@ -67,6 +68,12 @@ static void wifi_sta_try_candidate(size_t idx)
 	esp_wifi_connect();
 }
 
+/* Handles both STA-side events (joining the home network) and AP-side events
+ * (other devices joining/leaving the ESP's own "PortaPill" hotspot), since
+ * both are registered under the same WIFI_EVENT base with ESP_EVENT_ANY_ID.
+ * The AP connect/disconnect and free-heap logging here exists specifically
+ * so connection/socket-exhaustion issues can be diagnosed after the fact
+ * from /api/debug-log, without needing a USB cable plugged in. */
 static void wifi_sta_event_handler(void *arg, esp_event_base_t event_base,
 				    int32_t event_id, void *event_data)
 {
@@ -80,6 +87,14 @@ static void wifi_sta_event_handler(void *arg, esp_event_base_t event_base,
 		s_sta_candidate_idx = (s_sta_candidate_idx + 1) % HOME_WIFI_CANDIDATE_COUNT;
 		ESP_LOGW(TAG, "Wi-Fi link lost or unreachable, trying next network in the list...");
 		wifi_sta_try_candidate(s_sta_candidate_idx);
+	} else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STACONNECTED) {
+		wifi_event_ap_staconnected_t *event = (wifi_event_ap_staconnected_t *)event_data;
+		ESP_LOGI(TAG, "[NET] Device joined PortaPill hotspot: MAC=" MACSTR ", AID=%d, free heap=%lu bytes",
+			 MAC2STR(event->mac), event->aid, (unsigned long)esp_get_free_heap_size());
+	} else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_AP_STADISCONNECTED) {
+		wifi_event_ap_stadisconnected_t *event = (wifi_event_ap_stadisconnected_t *)event_data;
+		ESP_LOGI(TAG, "[NET] Device left PortaPill hotspot: MAC=" MACSTR ", AID=%d, reason=%d, free heap=%lu bytes",
+			 MAC2STR(event->mac), event->aid, event->reason, (unsigned long)esp_get_free_heap_size());
 	} else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
 		ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
 		s_sta_connected = true;
@@ -87,6 +102,19 @@ static void wifi_sta_event_handler(void *arg, esp_event_base_t event_base,
 			 HOME_WIFI_CANDIDATES[s_sta_candidate_idx].ssid, IP2STR(&event->ip_info.ip));
 		ESP_LOGI(TAG, "Dashboard also reachable on this network at http://" IPSTR "/ or http://portapill.local/",
 			 IP2STR(&event->ip_info.ip));
+
+		/* Re-set the hostname now that the STA interface actually has an IP.
+		 * mdns_init() ran earlier (right after the radio started, before this
+		 * IP existed), and re-calling mdns_hostname_set() with the same name
+		 * forces the mDNS component to re-probe and re-announce on every
+		 * active interface, including this one, right now. Without this, a
+		 * device that has never resolved portapill.local before could hit a
+		 * brief window where the responder hasn't fully settled onto the new
+		 * interface yet and its first query goes unanswered, while a device
+		 * with an already-cached answer from a previous visit never notices. */
+		if (mdns_hostname_set("portapill") == ESP_OK) {
+			ESP_LOGI(TAG, "mDNS re-announced on the home network interface");
+		}
 	}
 }
 
@@ -134,9 +162,13 @@ void start_wifi_ap(void)
 
 	ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
+	/* Registered unconditionally (not just when sta_enabled) so AP-side
+	 * connect/disconnect logging (see wifi_sta_event_handler) always works,
+	 * even on a build with no home Wi-Fi configured yet. */
+	ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+							      &wifi_sta_event_handler, NULL, NULL));
+
 	if (sta_enabled) {
-		ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-								      &wifi_sta_event_handler, NULL, NULL));
 		ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
 								      &wifi_sta_event_handler, NULL, NULL));
 		ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));

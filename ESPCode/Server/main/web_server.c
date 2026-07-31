@@ -10,9 +10,11 @@
 
 #include "esp_http_server.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "lwip/sockets.h"
 
 #include "audio_feedback.h"
 #include "bridge_state.h"
@@ -924,6 +926,51 @@ static esp_err_t root_get_handler(httpd_req_t *req)
 	return httpd_resp_send(req, response, HTTPD_RESP_USE_STRLEN);
 }
 
+/* Running count of currently-open HTTP sockets, purely for the [NET] log
+ * lines below, not used for any control-flow decisions. */
+static volatile int s_open_socket_count = 0;
+
+/* Called by esp_http_server the instant it accepts a new TCP connection,
+ * before any request has actually been read. Logging here, plus the
+ * matching close_fn below, gives a real-time trace of every connection's
+ * full lifetime and the client IP that opened it, specifically so
+ * connection/socket-exhaustion issues (like the ENFILE case this was added
+ * for) can be diagnosed after the fact from /api/debug-log. */
+static esp_err_t http_socket_open_cb(httpd_handle_t hd, int sockfd)
+{
+	struct sockaddr_in6 addr;
+	socklen_t addr_len = sizeof(addr);
+	char ip_str[48] = "unknown";
+
+	(void)hd;
+
+	if (getpeername(sockfd, (struct sockaddr *)&addr, &addr_len) == 0) {
+		if (addr.sin6_family == AF_INET) {
+			inet_ntop(AF_INET, &((struct sockaddr_in *)&addr)->sin_addr, ip_str, sizeof(ip_str));
+		} else {
+			inet_ntop(AF_INET6, &addr.sin6_addr, ip_str, sizeof(ip_str));
+		}
+	}
+
+	s_open_socket_count++;
+	ESP_LOGI(TAG, "[NET] HTTP socket OPEN  fd=%d from %s (now %d open, free heap=%lu bytes)",
+		 sockfd, ip_str, s_open_socket_count, (unsigned long)esp_get_free_heap_size());
+	return ESP_OK;
+}
+
+/* Mirrors http_socket_open_cb() above, called the instant a connection
+ * closes for any reason (client disconnect, timeout, handler returning an
+ * error, LRU eviction). */
+static void http_socket_close_cb(httpd_handle_t hd, int sockfd)
+{
+	(void)hd;
+
+	s_open_socket_count--;
+	ESP_LOGI(TAG, "[NET] HTTP socket CLOSE fd=%d (now %d open, free heap=%lu bytes)",
+		 sockfd, s_open_socket_count, (unsigned long)esp_get_free_heap_size());
+	close(sockfd);
+}
+
 void start_webserver(void)
 {
 	httpd_config_t config = HTTPD_DEFAULT_CONFIG();
@@ -931,7 +978,27 @@ void start_webserver(void)
 	config.max_uri_handlers = 20; /* currently 19 registered below; leaves headroom for new routes */
 	config.stack_size = 10240;
 	config.uri_match_fn = httpd_uri_match_wildcard;
-	config.max_open_sockets = 4; // Reserve sockets for DNS + lwIP internals (total lwIP sockets = 10)
+	/* Total lwIP socket budget is 16 (CONFIG_LWIP_MAX_SOCKETS, raised from
+	 * the original 10). Running AP+STA together, plus mDNS, SNTP, DHCP
+	 * housekeeping, and the captive DNS responder, consumes more of that
+	 * budget in the background than it looks like on paper, real testing
+	 * showed the system running out of sockets entirely (accept() failing
+	 * with ENFILE) within seconds of a second device joining, when the web
+	 * server alone was given 7 of a 10-socket total. Raising the total pool
+	 * instead of just reshuffling a too-small one leaves real headroom for
+	 * both the web server and everything running alongside it. */
+	config.max_open_sockets = 10;
+	/* Without this, once every socket is occupied, even by an idle/stale
+	 * connection a browser or phone left open without properly closing it,
+	 * the server flatly refuses every new connection instead of reclaiming
+	 * the least-recently-used one. That's the real cause of "worked once,
+	 * then nothing connects at all until the ESP is rebooted": sockets pile
+	 * up as idle over repeated visits and are never freed. This makes the
+	 * server evict the oldest idle connection to make room for a new one
+	 * instead of just rejecting it. */
+	config.lru_purge_enable = true;
+	config.open_fn = http_socket_open_cb;
+	config.close_fn = http_socket_close_cb;
 
 	if (httpd_start(&server, &config) == ESP_OK) {
 		httpd_uri_t root = {
