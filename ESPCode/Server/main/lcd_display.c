@@ -1,3 +1,27 @@
+/* ============================================================================
+ * LCD_DISPLAY.C - On-Device Touchscreen UI Implementation
+ * ----------------------------------------------------------------------------
+ * Three layers, top to bottom:
+ *
+ *   1. Raw ST7796 display driver (lcd_send_cmd/lcd_send_data/lcd_fill_rect/
+ *      lcd_draw_string, etc.) - talks SPI directly to the panel, including a
+ *      hand-rolled 5x7 bitmap font, no graphics library involved.
+ *   2. Screen renderers (the screen_draw_* functions) - each draws one full
+ *      screen of the UI (status view, slot menu, edit forms, feedback
+ *      cards) from the current ui_state_t and the live bridge_state
+ *      snapshot.
+ *   3. Two FreeRTOS tasks that tie it together: button_task() polls the
+ *      5-way pad and turns raw pin edges into UI actions (moving the
+ *      cursor, entering edit mode, triggering a dispense), and
+ *      screen_task() owns ui_state and periodically re-renders whichever
+ *      screen is currently active.
+ *
+ * ui_state_t is the single source of truth for what the LCD is currently
+ * showing and any in-progress edit, only screen_task()'s thread ever
+ * touches it, button_task() communicates with it exclusively through
+ * btn_queue.
+ * ============================================================================ */
+
 #include "lcd_display.h"
 
 #include <stdbool.h>
@@ -130,6 +154,14 @@ typedef struct {
 static QueueHandle_t btn_queue;
 static ui_state_t    ui_state;
 
+/* ----------------------------------------------------------------------------
+ * Raw ST7796 display driver
+ * ----------------------------------------------------------------------------
+ * The panel is controlled over SPI with a separate D/C (data/command) GPIO
+ * line: pulling D/C low before a transfer means "this byte is a command",
+ * pulling it high means "this is pixel/parameter data". Everything in this
+ * section is built on that one primitive.
+ * ---------------------------------------------------------------------------- */
 static void lcd_send_cmd(uint8_t cmd)
 {
 	gpio_set_level(LCD_DC, 0);
@@ -152,6 +184,10 @@ static void lcd_send_byte(uint8_t b)
 	lcd_send_data(&b, 1);
 }
 
+/* Hardware reset pulse followed by the panel's standard init sequence:
+ * software reset, sleep-out, 16-bit color mode, then the memory access
+ * control byte that sets orientation (landscape, rotated 180 degrees to
+ * match how the panel is mounted) and RGB/BGR pixel order. */
 static void lcd_st7796_init(void)
 {
 	gpio_set_level(LCD_RST, 0);
@@ -167,6 +203,9 @@ static void lcd_st7796_init(void)
 	lcd_send_cmd(0x29);
 }
 
+/* Sets the panel's active drawing rectangle (column/row address window),
+ * every pixel sent after this lands inside that box, wrapping row by row.
+ * All higher-level drawing (fill_rect, characters) goes through this. */
 static void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 {
 	uint8_t col[] = { x0 >> 8, x0, x1 >> 8, x1 };
@@ -177,6 +216,10 @@ static void lcd_set_window(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1)
 	gpio_set_level(LCD_DC, 1);
 }
 
+/* Fills a rectangle with a solid color, one row at a time from a
+ * pre-filled line buffer, clamped to stay on-screen if x/y/w/h would
+ * otherwise run past the panel edge. The one workhorse every other shape
+ * (lines, characters, filled boxes) is built from. */
 static void lcd_fill_rect(uint16_t x, uint16_t y, uint16_t w, uint16_t h, uint16_t color)
 {
 	int row_bytes;
@@ -222,6 +265,9 @@ static void lcd_draw_hline(uint16_t x, uint16_t y, uint16_t w, uint16_t color)
 	lcd_fill_rect(x, y, w, 2, color);
 }
 
+/* Bitmap font, 5x7 pixels per glyph, one column of bits per byte. Covers
+ * space through uppercase Z (ASCII 32-90), enough for every screen in this
+ * UI since text is upper-cased before drawing (see lcd_draw_string). */
 static const uint8_t lcd_font5x7[][5] = {
 	{0x00,0x00,0x00,0x00,0x00}, /* space */
 	{0x00,0x00,0x5F,0x00,0x00}, /* !     */
@@ -284,6 +330,9 @@ static const uint8_t lcd_font5x7[][5] = {
 	{0x61,0x51,0x49,0x45,0x43}, /* Z     */
 };
 
+/* Draws one character by rendering each bit of its 5x7 bitmap as a small
+ * filled square, scale controls how big each "pixel" of the font is on
+ * screen. */
 static void lcd_draw_char(uint16_t x, uint16_t y, char c, uint16_t color, uint16_t bg, int scale)
 {
 	const uint8_t *bmp;
@@ -303,6 +352,9 @@ static void lcd_draw_char(uint16_t x, uint16_t y, char c, uint16_t color, uint16
 	}
 }
 
+/* Draws a full string left to right, upper-casing letters (the font only
+ * has uppercase glyphs) and stopping early rather than wrapping if the
+ * text would run off the right or bottom edge of the screen. */
 static void lcd_draw_string(uint16_t x, uint16_t y, const char *str, uint16_t color, uint16_t bg, int scale)
 {
 	char c;
@@ -380,7 +432,17 @@ static void screen_format_next_dispense(const char *raw, char *out, size_t out_s
 	out[out_len] = '\0';
 }
 
-/* Renders the live pill slot data onto the LCD. Called from screen_task. */
+/* ----------------------------------------------------------------------------
+ * screen_draw_ui()
+ * ----------------------------------------------------------------------------
+ * The main status screen, and the busiest render function in this file:
+ * title bar with clock and a connection/alert badge, a 3-row table (one
+ * per slot) of medication/pills-left/dose/status, and a banner showing
+ * when the next scheduled dispense is due. Redrawn on a timer by
+ * screen_task() while this screen is active. Alert conditions (a failed
+ * dispense, a low pill count) are scanned for up front so the header badge
+ * can reflect the worst one at a glance before the per-row detail is drawn.
+ * ---------------------------------------------------------------------------- */
 static void screen_draw_ui(const pico_bridge_state_t *snapshot)
 {
 	char buf[32];
@@ -538,6 +600,9 @@ static void screen_draw_ui(const pico_bridge_state_t *snapshot)
 	lcd_draw_string(210, 278, next_dispense, LCD_WHITE, LCD_DKGREY, 2);
 }
 
+/* The strip along the bottom of every menu screen reminding the user what
+ * each button does on that particular screen, wording changes per screen
+ * since not every screen supports the same actions. */
 static void screen_draw_help_bar(const char *text)
 {
 	lcd_fill_rect(0, 300, SCREEN_W, 20, LCD_DKGREY);
@@ -545,6 +610,8 @@ static void screen_draw_help_bar(const char *text)
 	lcd_draw_string(8, 306, text, LCD_WHITE, LCD_DKGREY, 1);
 }
 
+/* Small "SLOT X OF 3" label in the title bar's top-right corner, right-
+ * aligned so it doesn't collide with the screen title on the left. */
 static void screen_draw_slot_position_label(int slot_index)
 {
 	char pos[32];
@@ -560,6 +627,9 @@ static void screen_draw_slot_position_label(int slot_index)
 
 /* ── Menu draw functions ───────────────────────────────────────────────────── */
 
+/* Scrollable list of the 3 slots, highlighting whichever one the cursor is
+ * on. Selecting one here moves into screen_draw_action_menu() for that
+ * slot. */
 static void screen_draw_slot_menu(const pico_bridge_state_t *snap, int cursor)
 {
 	char buf[20];
@@ -611,6 +681,8 @@ static void screen_draw_slot_menu(const pico_bridge_state_t *snap, int cursor)
 	screen_draw_help_bar("UP/DOWN=MOVE   OK=SELECT   HOLD OK=HOME");
 }
 
+/* The 3-option menu (Dispense Now / Edit Profile / Back) shown after a slot
+ * is picked from the slot menu. */
 static void screen_draw_action_menu(int slot, int cursor)
 {
 	static const char *const actions[3]   = { "DISPENSE NOW", "EDIT PROFILE", "BACK" };
@@ -638,6 +710,8 @@ static void screen_draw_action_menu(int slot, int cursor)
 	screen_draw_help_bar("UP/DOWN=MOVE   OK=SELECT   HOLD OK=BACK");
 }
 
+/* Yes/No confirmation shown before a manual dispense actually fires, a
+ * deliberate extra step so a stray button press can't dispense pills. */
 static void screen_draw_dispense_confirm(int slot, int cursor)
 {
 	bool yes_sel = (cursor == 0);
@@ -660,6 +734,9 @@ static void screen_draw_dispense_confirm(int slot, int cursor)
 	screen_draw_help_bar("UP/DOWN=CHOOSE   OK=CONFIRM   HOLD OK=CANCEL");
 }
 
+/* Generic centered message card (title bar + boxed message), the shared
+ * layout used by every waiting/success/failure notice screen below, each
+ * of those is just this with different text and accent color. */
 static void screen_draw_feedback_card(const char *title, const char *message, uint16_t accent)
 {
 	lcd_fill_rect(0, 0, SCREEN_W, SCREEN_H, LCD_BLACK);
@@ -675,6 +752,8 @@ static void screen_draw_feedback_card(const char *title, const char *message, ui
 	screen_draw_help_bar("PLEASE WAIT...");
 }
 
+/* Shown the moment a dispense command is sent, while waiting on the
+ * Pico's ACK. */
 static void screen_draw_dispense_waiting(void)
 {
 	lcd_fill_rect(0, 0, SCREEN_W, SCREEN_H, LCD_BLACK);
@@ -691,6 +770,9 @@ static void screen_draw_dispense_waiting(void)
 	screen_draw_help_bar("WAITING FOR RESULT...");
 }
 
+/* Shown after a successful dispense, while still waiting on the drawer to
+ * be opened for pickup confirmation. Pressing OK dismisses it early
+ * without needing to actually open the drawer right that second. */
 static void screen_draw_dispense_success_wait(void)
 {
 	lcd_fill_rect(0, 0, SCREEN_W, SCREEN_H, LCD_BLACK);
@@ -708,6 +790,8 @@ static void screen_draw_dispense_success_wait(void)
 	screen_draw_help_bar("OPEN TRAY OR PRESS OK");
 }
 
+/* Shown when a dispense fails or times out, prompting the user to check
+ * for a physical jam on the affected slot. */
 static void screen_draw_dispense_failure_wait(int slot)
 {
 	char msg[48];
@@ -792,6 +876,11 @@ static void schedule_summary(const ui_state_t *st, char *out, size_t out_size)
 	}
 }
 
+/* The per-slot profile editor: a vertical list of fields (name, total
+ * pills, dose size, schedule, then a final confirm/save step). Pressing OK
+ * on a field either edits it in place (numeric fields) or opens a
+ * dedicated sub-screen (name uses the on-screen keyboard, schedule uses
+ * its own digit editor below). */
 static void screen_draw_edit(const ui_state_t *st)
 {
 	static const char *const field_labels[EDIT_FIELD_COUNT] = {
@@ -967,6 +1056,17 @@ static void lcd_finish_name_edit(void)
 
 /* ── Button polling task ───────────────────────────────────────────────────── */
 
+/* ----------------------------------------------------------------------------
+ * button_task()
+ * ----------------------------------------------------------------------------
+ * Polls the 5 button GPIOs (active-low) on a short interval, debounces
+ * each one independently, and turns clean press/release edges into
+ * btn_event_t values pushed onto btn_queue for screen_task() to consume.
+ * The OK button is handled specially: a short press posts BTN_EVT_SELECT,
+ * but if it's held past BTN_LONG_MS it posts BTN_EVT_BACK instead, giving
+ * the 5-way pad a "back/home" action without a dedicated 6th button. Runs
+ * forever once started.
+ * ---------------------------------------------------------------------------- */
 static void button_task(void *arg)
 {
 	bool prev_left = true;
@@ -1052,6 +1152,24 @@ static void button_task(void *arg)
 	}
 }
 
+/* ----------------------------------------------------------------------------
+ * screen_task()
+ * ----------------------------------------------------------------------------
+ * The other half of the UI: owns ui_state (the only task that ever writes
+ * to it) and drives the whole menu system. Each loop iteration:
+ *
+ *   1. Drains btn_queue and applies each event to ui_state according to
+ *      whichever screen is currently active, moving the cursor, entering
+ *      a sub-screen, saving an edit, or sending a dispense/profile update
+ *      over the UART bridge.
+ *   2. Falls back to the status screen after UI_INACTIVITY_TIMEOUT_MS of
+ *      no input, so the device doesn't get stuck in a menu indefinitely.
+ *   3. Takes a snapshot of bridge_state under its mutex and re-renders
+ *      whichever screen is active, calling the matching screen_draw_*
+ *      function from earlier in this file.
+ *
+ * Runs forever once started.
+ * ---------------------------------------------------------------------------- */
 static void screen_task(void *arg)
 {
 	pico_bridge_state_t *snapshot;
@@ -1494,6 +1612,9 @@ static void screen_task(void *arg)
 	free(snapshot); /* unreachable */
 }
 
+/* Sets up the SPI bus and the LCD's control pins (backlight, D/C, reset),
+ * runs the panel init sequence, then starts button_task() and
+ * screen_task(). Call once at boot. */
 void start_lcd_display(void)
 {
 	spi_bus_config_t bus = {

@@ -1,3 +1,12 @@
+/* ============================================================================
+ * CAPTIVE_DNS.H - Captive Portal DNS Responder
+ * ----------------------------------------------------------------------------
+ * A minimal DNS server that always answers with the ESP's own address, so
+ * a phone or laptop that joins the "PortaPill" hotspot gets automatically
+ * prompted to open the dashboard, the same behavior as hotel or airport
+ * Wi-Fi login pages.
+ * ============================================================================ */
+
 #ifndef CAPTIVE_DNS_H
 #define CAPTIVE_DNS_H
 

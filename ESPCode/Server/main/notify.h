@@ -1,14 +1,15 @@
+/* ============================================================================
+ * NOTIFY.H - Caretaker Notification System
+ * ----------------------------------------------------------------------------
+ * Sends push notifications (via the free ntfy.sh service) to whoever has
+ * subscribed to this device's topic: escalating "pickup not confirmed"
+ * reminders, low/empty pill alerts, and scheduled-dose confirmations. See
+ * ntfy_credentials.h for the topic itself, and notify_get_topic()/
+ * notify_get_subscribe_url() below for how a caretaker actually subscribes.
+ * ============================================================================ */
+
 #ifndef NOTIFY_H
 #define NOTIFY_H
-
-/* PortaPill Caretaker Notification System
- *
- * Sends push notifications (via the free ntfy.sh service) to whoever has
- * subscribed to this device's topic, most importantly a "pickup not
- * confirmed" alert when a dose was dispensed but the drawer sensor never
- * saw it opened. See ntfy_credentials.h for the topic itself, and
- * notify_get_topic()/notify_get_subscribe_url() below for how a caretaker
- * actually subscribes. */
 
 #include <time.h>
 

@@ -29,11 +29,15 @@
 #define PIEZO_PIN       PIEZO_PIN_SLOT0
 #define IR_PIN          IR_PIN_SLOT0
 
-// Hall effect sensor: RETIRED. GPIO6 is now the Motor 2 (Slot 2) stepper's
-// AIN2 line, see stepper_control.c. sensor_interrupts_init() no longer
+// Hall effect sensor: UNUSED. GPIO6 was only ever wired up for early
+// sensor testing, it has not been a real production hall sensor for a
+// long time. It's now the Motor 2 (Slot 1) stepper's AIN1 line on the
+// DRV4 driver (see stepper_control.c). sensor_interrupts_init() no longer
 // claims this pin; the hall_effect_* functions below are inert (no pin is
-// ever driven low or read for them, counts just stay at 0).
-#define HALL_EFFECT_PIN 6       // GPIO pin for hall effect sensor (unused, retired)
+// ever driven low or read for them, counts just stay at 0). The real
+// per-slot hall-effect drawer sensors are wired to the ESP32
+// (GPIO33/34/35), not the Pico.
+#define HALL_EFFECT_PIN 6       // legacy define, GPIO6 is unused for sensing (see note above)
 
 // Debounce settings
 #define PIEZO_DEBOUNCE_MS 100   // Debounce time for piezo (vibration settling)

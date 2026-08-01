@@ -1,3 +1,24 @@
+/* ============================================================================
+ * WEB_SERVER.C - HTTP Dashboard and JSON API Implementation
+ * ----------------------------------------------------------------------------
+ * Three groups of routes, registered in start_webserver() at the bottom of
+ * this file:
+ *
+ *   1. Static/asset routes (root_get_handler, logo_get_handler, and the
+ *      captive-portal probe handlers) - root_get_handler is the big one,
+ *      it serves the entire dashboard as one self-contained HTML page with
+ *      inline CSS and JS, no separate front-end build step or file server
+ *      needed.
+ *   2. JSON API routes (status/profile/dispense/time-sync/feedback-test/
+ *      simulate-dispense/edit-mode) - read and mutate bridge_state, the
+ *      same shared state the LCD and UART bridge use, guarded by
+ *      bridge_state_mutex.
+ *   3. Socket lifecycle tracking (http_socket_open_cb/close_cb and
+ *      web_server_close_sockets_for_ip) - logs every connection's open/
+ *      close for remote diagnosis and lets wifi_ap.c proactively close a
+ *      socket left behind by a device that dropped off Wi-Fi abruptly.
+ * ============================================================================ */
+
 #include "web_server.h"
 
 #include <stdarg.h>
@@ -31,6 +52,9 @@ static const char *TAG = "time_server";
 #define STATUS_SLOTS_BUFFER_SIZE    3072
 #define HISTORY_JSON_BUFFER_SIZE    3300
 
+/* Sends a bare 302 redirect to "/". Used by the captive-portal probe
+ * handlers below, whose job is just to get the OS to open a real browser
+ * at the dashboard. */
 static esp_err_t redirect_to_root(httpd_req_t *req)
 {
 	httpd_resp_set_status(req, "302 Found");
@@ -38,6 +62,10 @@ static esp_err_t redirect_to_root(httpd_req_t *req)
 	return httpd_resp_send(req, NULL, 0);
 }
 
+/* Answers Apple's captive-portal probe (and the similarly-registered
+ * Android/Windows probe URLs further down) with a trivial page, matching
+ * the pattern hotel/airport Wi-Fi portals use to trigger the OS's
+ * "sign in to this network" prompt automatically. */
 static esp_err_t apple_captive_handler(httpd_req_t *req)
 {
 	const char *response = "<html><body>Login</body></html>";
@@ -52,6 +80,9 @@ static esp_err_t apple_captive_handler(httpd_req_t *req)
 extern const uint8_t logo_png_start[] asm("_binary_PortaPill_logo_web_png_start");
 extern const uint8_t logo_png_end[]   asm("_binary_PortaPill_logo_web_png_end");
 
+/* Serves the dashboard's logo image straight out of flash, embedded into
+ * the firmware binary at build time (see the extern declarations above),
+ * no filesystem needed. */
 static esp_err_t logo_get_handler(httpd_req_t *req)
 {
 	httpd_resp_set_type(req, "image/png");
@@ -85,11 +116,17 @@ static esp_err_t debug_log_get_handler(httpd_req_t *req)
 	return result;
 }
 
+/* Renders a C bool as the JSON literal "true"/"false" for building JSON
+ * responses by hand with snprintf, no JSON library is used anywhere in
+ * this file. */
 static const char *json_bool(bool value)
 {
 	return value ? "true" : "false";
 }
 
+/* Reads an HTTP request body into a caller-supplied buffer, bounded by
+ * both the buffer size and the request's own declared Content-Length.
+ * Every POST handler in this file starts by calling this. */
 static esp_err_t read_http_body(httpd_req_t *req, char *buffer, size_t buffer_size)
 {
 	int total_received = 0;
@@ -114,6 +151,10 @@ static esp_err_t read_http_body(httpd_req_t *req, char *buffer, size_t buffer_si
 	return total_received == req->content_len ? ESP_OK : ESP_ERR_HTTPD_RESULT_TRUNC;
 }
 
+/* Extracts one field's value from a URL-encoded form body ("key=value&...")
+ * and decodes it in place (%XX escapes and '+' for space), the standard
+ * application/x-www-form-urlencoded format the dashboard's JS sends POST
+ * bodies as. Returns false if the key isn't present. */
 static bool http_body_get_string(const char *body, const char *key, char *value, size_t value_size)
 {
 	char *src;
@@ -154,6 +195,7 @@ static bool http_body_get_string(const char *body, const char *key, char *value,
 	return false;
 }
 
+/* Same as http_body_get_string(), but parses the result as an integer. */
 static bool http_body_get_int(const char *body, const char *key, int *value)
 {
 	char temp[16];
@@ -166,6 +208,10 @@ static bool http_body_get_int(const char *body, const char *key, int *value)
 	return true;
 }
 
+/* Rejects a medication name containing '|', '\n', or '\r', since those are
+ * the field/line delimiters used by the UART protocol to the Pico, letting
+ * one through as-is would corrupt whatever LOAD_PROFILE line it ends up
+ * embedded in. */
 static bool bridge_validate_medication_name(const char *name)
 {
 	if (name == NULL || name[0] == '\0') {
@@ -175,6 +221,8 @@ static bool bridge_validate_medication_name(const char *name)
 	return strchr(name, '|') == NULL && strchr(name, '\n') == NULL && strchr(name, '\r') == NULL;
 }
 
+/* Sends body as a JSON response with the given HTTP status line, e.g.
+ * send_json_response(req, "200 OK", "{\"ok\":true}"). */
 static esp_err_t send_json_response(httpd_req_t *req, const char *status, const char *body)
 {
 	httpd_resp_set_status(req, status);
@@ -182,6 +230,10 @@ static esp_err_t send_json_response(httpd_req_t *req, const char *status, const 
 	return httpd_resp_send(req, body, HTTPD_RESP_USE_STRLEN);
 }
 
+/* POST /api/profile - saves a slot's medication name, pill counts, and
+ * dose timing/schedule, both to bridge_state (and NVS) and pushed down to
+ * the Pico via bridge_send_load_profile_for_slot() so both sides agree on
+ * what's configured. */
 static esp_err_t profile_post_handler(httpd_req_t *req)
 {
 	char body[HTTP_BODY_BUFFER_SIZE];
@@ -240,6 +292,12 @@ static esp_err_t profile_post_handler(httpd_req_t *req)
 	return send_json_response(req, "200 OK", "{\"ok\":true}");
 }
 
+/* POST /api/dispense - queues one or more slots for a manual dispense
+ * ("slot" for one, or "slots" as a comma-separated list for several at
+ * once), then kicks off the first one if nothing is already in flight.
+ * Always enqueued through bridge_enqueue_dispense_slot_locked() rather
+ * than sent immediately, so this plays correctly with the schedule
+ * checker and other manual requests instead of racing them. */
 static esp_err_t dispense_post_handler(httpd_req_t *req)
 {
 	char body[HTTP_BODY_BUFFER_SIZE];
@@ -302,6 +360,11 @@ static esp_err_t dispense_post_handler(httpd_req_t *req)
 	return send_json_response(req, "200 OK", "{\"ok\":true}");
 }
 
+/* POST /api/time-sync - the dashboard's manual "Sync Clock" button. If the
+ * request includes an epoch (the browser's own clock, useful as a fallback
+ * when the ESP has no internet access for NTP), applies it to the ESP's
+ * clock first. Either way, relays the ESP's current time to the Pico
+ * afterward. */
 static esp_err_t time_sync_post_handler(httpd_req_t *req)
 {
 	char body[HTTP_BODY_BUFFER_SIZE];
@@ -328,6 +391,10 @@ static esp_err_t time_sync_post_handler(httpd_req_t *req)
 	return send_json_response(req, "200 OK", "{\"ok\":true}");
 }
 
+/* POST /api/test-feedback - the dashboard's "Test Success/Failure Alert"
+ * buttons. Fires the LED/audio feedback (and, for success, a real test
+ * push notification) without needing an actual dispense, useful for
+ * verifying those subsystems work independently of the Pico. */
 static esp_err_t feedback_test_post_handler(httpd_req_t *req)
 {
 	char body[HTTP_BODY_BUFFER_SIZE];
@@ -401,6 +468,10 @@ static esp_err_t simulate_dispense_post_handler(httpd_req_t *req)
 	return send_json_response(req, "200 OK", "{\"ok\":true}");
 }
 
+/* POST /api/edit-mode - toggles the edit-mode LED indicator for a slot
+ * while its profile form is open in the dashboard, so the same slot LED
+ * used for dispense feedback also shows "someone is currently editing
+ * this one" on the physical device. */
 static esp_err_t edit_mode_post_handler(httpd_req_t *req)
 {
 	char body[HTTP_BODY_BUFFER_SIZE];
@@ -431,6 +502,10 @@ static esp_err_t edit_mode_post_handler(httpd_req_t *req)
 	return send_json_response(req, "200 OK", "{\"ok\":true}");
 }
 
+/* printf-style append into a buffer, tracking how much of it is used so
+ * far. Used throughout status_get_handler() to build up the slots/history
+ * JSON arrays piece by piece without needing a JSON library. Stops
+ * (returns false) rather than overflowing if the buffer fills up. */
 static bool bridge_append_text(char *buffer, size_t buffer_size, size_t *used, const char *format, ...)
 {
 	va_list args;
@@ -457,6 +532,18 @@ static bool bridge_append_text(char *buffer, size_t buffer_size, size_t *used, c
 	return true;
 }
 
+/* ----------------------------------------------------------------------------
+ * status_get_handler()
+ * ----------------------------------------------------------------------------
+ * GET /api/status - the JSON the dashboard's JS polls every 1.5s to refresh
+ * the whole page. Takes one consistent snapshot of bridge_state under its
+ * mutex, then builds the response outside the lock: every slot's full
+ * profile/status, the dispense history (newest first), computed alert
+ * flags (any slot failed, any slot low on pills), and the next-dispense
+ * summary string. Buffers are heap-allocated rather than stack, this
+ * response is large enough that stack allocation would be risky on a task
+ * with a modest stack size.
+ * ---------------------------------------------------------------------------- */
 static esp_err_t status_get_handler(httpd_req_t *req)
 {
 	char time_buf[64];
@@ -618,6 +705,30 @@ static esp_err_t status_get_handler(httpd_req_t *req)
 	return result;
 }
 
+/* ----------------------------------------------------------------------------
+ * root_get_handler()
+ * ----------------------------------------------------------------------------
+ * GET / - serves the entire dashboard as one self-contained HTML page: CSS
+ * inlined in a <style> block, JS inlined in a <script> block, no separate
+ * assets or build step beyond the logo image. Kept in one C string
+ * literal on purpose, so the whole front-end ships as part of the
+ * firmware binary itself.
+ *
+ * Broad structure of the page, for orientation:
+ *   - <style>: CSS custom properties for the color palette up top, then
+ *     the layout/component rules.
+ *   - Body markup: a header with the logo and live status badge, a tab
+ *     strip (Slots / History / Settings), and per-tab content panels.
+ *   - <script>: fetches /api/status on a 1.5s interval and re-renders the
+ *     slot cards, history list, and header badge from the response;
+ *     posts to /api/profile, /api/dispense, /api/time-sync,
+ *     /api/test-feedback, and /api/edit-mode in response to user actions.
+ *
+ * The C-level logic in this function is just building and sending one
+ * big string, all the actual application behavior for this page lives in
+ * the embedded JS, and all the data it displays comes from
+ * status_get_handler() above.
+ * ---------------------------------------------------------------------------- */
 static esp_err_t root_get_handler(httpd_req_t *req)
 {
 	const char *response =
@@ -930,6 +1041,23 @@ static esp_err_t root_get_handler(httpd_req_t *req)
  * lines below, not used for any control-flow decisions. */
 static volatile int s_open_socket_count = 0;
 
+/* Handle to the running server, kept so web_server_close_sockets_for_ip()
+ * (called from wifi_ap.c on an abrupt Wi-Fi disconnect) can reach it from
+ * outside start_webserver(). NULL until the server has actually started. */
+static httpd_handle_t s_server = NULL;
+
+/* Tracks which IP address each currently-open socket belongs to, so a
+ * device that drops off Wi-Fi abruptly (see web_server_close_sockets_for_ip)
+ * can have its lingering socket(s) found and closed by IP, since the AP
+ * disconnect event only gives a MAC/IP, not a socket fd. Sized above
+ * max_open_sockets so it can never fill up first. */
+#define MAX_TRACKED_SOCKETS 12
+typedef struct {
+	int fd; /* -1 = empty slot */
+	char ip[48];
+} tracked_socket_t;
+static tracked_socket_t s_tracked_sockets[MAX_TRACKED_SOCKETS];
+
 /* Called by esp_http_server the instant it accepts a new TCP connection,
  * before any request has actually been read. Logging here, plus the
  * matching close_fn below, gives a real-time trace of every connection's
@@ -952,6 +1080,14 @@ static esp_err_t http_socket_open_cb(httpd_handle_t hd, int sockfd)
 		}
 	}
 
+	for (int i = 0; i < MAX_TRACKED_SOCKETS; i++) {
+		if (s_tracked_sockets[i].fd == -1) {
+			s_tracked_sockets[i].fd = sockfd;
+			snprintf(s_tracked_sockets[i].ip, sizeof(s_tracked_sockets[i].ip), "%s", ip_str);
+			break;
+		}
+	}
+
 	s_open_socket_count++;
 	ESP_LOGI(TAG, "[NET] HTTP socket OPEN  fd=%d from %s (now %d open, free heap=%lu bytes)",
 		 sockfd, ip_str, s_open_socket_count, (unsigned long)esp_get_free_heap_size());
@@ -960,10 +1096,18 @@ static esp_err_t http_socket_open_cb(httpd_handle_t hd, int sockfd)
 
 /* Mirrors http_socket_open_cb() above, called the instant a connection
  * closes for any reason (client disconnect, timeout, handler returning an
- * error, LRU eviction). */
+ * error, LRU eviction, or web_server_close_sockets_for_ip() below). */
 static void http_socket_close_cb(httpd_handle_t hd, int sockfd)
 {
 	(void)hd;
+
+	for (int i = 0; i < MAX_TRACKED_SOCKETS; i++) {
+		if (s_tracked_sockets[i].fd == sockfd) {
+			s_tracked_sockets[i].fd = -1;
+			s_tracked_sockets[i].ip[0] = '\0';
+			break;
+		}
+	}
 
 	s_open_socket_count--;
 	ESP_LOGI(TAG, "[NET] HTTP socket CLOSE fd=%d (now %d open, free heap=%lu bytes)",
@@ -971,10 +1115,61 @@ static void http_socket_close_cb(httpd_handle_t hd, int sockfd)
 	close(sockfd);
 }
 
+void web_server_close_sockets_for_ip(const char *ip_str)
+{
+	size_t ip_len;
+	int closed_count = 0;
+
+	if (s_server == NULL || ip_str == NULL) {
+		return;
+	}
+
+	ip_len = strlen(ip_str);
+
+	for (int i = 0; i < MAX_TRACKED_SOCKETS; i++) {
+		int fd = s_tracked_sockets[i].fd;
+		size_t stored_len;
+
+		if (fd == -1) {
+			continue;
+		}
+
+		/* Stored IPs are often in IPv4-mapped IPv6 form, "::FFFF:192.168.4.2",
+		 * since this is a dual-stack socket, while callers pass a plain
+		 * dotted-quad. A suffix match handles both without needing to parse
+		 * or normalize either side. */
+		stored_len = strlen(s_tracked_sockets[i].ip);
+		if (stored_len >= ip_len &&
+		    strcmp(s_tracked_sockets[i].ip + (stored_len - ip_len), ip_str) == 0) {
+			ESP_LOGI(TAG, "[NET] Closing lingering HTTP socket fd=%d for %s (device left Wi-Fi abruptly)",
+				 fd, ip_str);
+			httpd_sess_trigger_close(s_server, fd);
+			closed_count++;
+		}
+	}
+
+	if (closed_count == 0) {
+		ESP_LOGD(TAG, "[NET] No lingering HTTP sockets found for %s", ip_str);
+	}
+}
+
+/* ----------------------------------------------------------------------------
+ * start_webserver()
+ * ----------------------------------------------------------------------------
+ * Configures and starts the HTTP server, then registers every route: the
+ * dashboard and its assets, the JSON API, and the captive-portal probe
+ * URLs used by Android/Apple/Windows to detect this is a login-required
+ * network. Call once at boot.
+ * ---------------------------------------------------------------------------- */
 void start_webserver(void)
 {
 	httpd_config_t config = HTTPD_DEFAULT_CONFIG();
 	httpd_handle_t server = NULL;
+
+	for (int i = 0; i < MAX_TRACKED_SOCKETS; i++) {
+		s_tracked_sockets[i].fd = -1;
+	}
+
 	config.max_uri_handlers = 20; /* currently 19 registered below; leaves headroom for new routes */
 	config.stack_size = 10240;
 	config.uri_match_fn = httpd_uri_match_wildcard;
@@ -1001,6 +1196,7 @@ void start_webserver(void)
 	config.close_fn = http_socket_close_cb;
 
 	if (httpd_start(&server, &config) == ESP_OK) {
+		s_server = server;
 		httpd_uri_t root = {
 			.uri = "/",
 			.method = HTTP_GET,

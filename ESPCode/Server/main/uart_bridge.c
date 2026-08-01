@@ -1,3 +1,15 @@
+/* ============================================================================
+ * UART_BRIDGE.C - Pico Communication Bridge
+ * ----------------------------------------------------------------------------
+ * Implements the line-based protocol that connects the ESP to the Pico 2
+ * controller: sending commands (DISPENSE, SET_TIME, LOAD_PROFILE) and
+ * parsing what comes back (ACK, STATUS, BOOT_SYNC). Owns the RX task that
+ * reads the UART byte stream, reassembles it into lines, and applies each
+ * one to the shared bridge_state under bridge_state_mutex. Also runs the
+ * schedule checker that auto-fires a dispense when a profile's scheduled
+ * time arrives.
+ * ============================================================================ */
+
 #include "uart_bridge.h"
 
 #include <stdio.h>
@@ -25,23 +37,20 @@ static const char *TAG = "time_server";
 #define UART_BRIDGE_BUFFER_SIZE 512
 #define UART_BRIDGE_LINE_SIZE 256
 
-/* Serializes actual writes to the UART port. The heartbeat (uart_bridge_task
- * itself), the LCD's button handler, and the web server's request handlers
- * are all separate FreeRTOS tasks that can each independently decide to
- * send a line at any moment, e.g. a manual "Dispense Now" click landing at
- * the same instant the 60s SET_TIME heartbeat fires. Without a lock around
- * the write, two concurrent uart_write_bytes() calls on the same port can
- * interleave on the wire and glue the tail of one line onto the head of
- * another with no newline between them, exactly what a live capture
- * caught: "CMD|action=SET_TIME|epoch=178526CMD|action=DISPENSE|slot=0"
- * arriving as a single garbled line, silently swallowing the DISPENSE
- * command entirely (the Pico's parser only ever sees the first action= in
- * the merged line). This directly explains the intermittent stuck-dispense
- * bug: it only happens when two sends race, which is far likelier right
- * after a failed dispense since that takes 30+ seconds, shifting the
- * heartbeat's timing to land right as someone retries. */
+/* Guards every write to the UART port. Several independent tasks can
+ * decide to send a line at the same moment, the heartbeat inside
+ * uart_bridge_task(), the LCD's button handler, and the web server's
+ * request handlers, and without serializing the actual write, two
+ * concurrent transmissions can interleave on the wire and merge into one
+ * garbled line with no newline between them. Since the Pico's parser only
+ * reads up to the first newline, a merged line silently loses whichever
+ * command didn't come first. Holding this mutex around the write
+ * guarantees each line goes out atomically. */
 static SemaphoreHandle_t s_uart_tx_mutex;
 
+/* Writes one line to the Pico over UART, holding s_uart_tx_mutex for the
+ * duration so it can never interleave with another task's send. Every
+ * outbound command in this file funnels through here. */
 static void uart_bridge_send_line(const char *line)
 {
 	if (line == NULL) {
@@ -58,6 +67,11 @@ static void uart_bridge_send_line(const char *line)
 	}
 }
 
+/* Sends the ESP's current epoch to the Pico so its software RTC stays in
+ * sync. Used both for the real initial sync (after NTP) and as a periodic
+ * heartbeat (see uart_bridge_task), the Pico ACKs it either way, which is
+ * what lets the ESP know the link is still alive. No-ops and returns false
+ * if the ESP's own clock hasn't been set yet. */
 bool bridge_send_set_time(void)
 {
 	char line[96];
@@ -73,6 +87,9 @@ bool bridge_send_set_time(void)
 	return true;
 }
 
+/* Sends the raw DISPENSE command for a specific slot. Low-level send only,
+ * does not touch bridge_state, callers that need to track the resulting
+ * ACK should go through bridge_start_dispense_locked() instead. */
 void bridge_send_dispense_for_slot(int slot_number)
 {
 	char line[64];
@@ -86,6 +103,12 @@ void bridge_send_dispense_for_slot(int slot_number)
 	uart_bridge_send_line(line);
 }
 
+/* Sends the dispense command and marks state as awaiting its ACK, arming
+ * the timeout deadline. is_scheduled is remembered for later, once the ACK
+ * comes back "ok", it decides whether a "dose dispensed" notification gets
+ * sent (scheduled doses only). Any earlier drawer-open wait is superseded,
+ * since a fresh dispense on this slot means the old one's pickup window no
+ * longer applies. */
 static void bridge_start_dispense_locked(pico_bridge_state_t *state, int slot_number, bool is_scheduled)
 {
 	if (state == NULL || bridge_slot_index_from_number(slot_number) < 0) {
@@ -105,6 +128,16 @@ static void bridge_start_dispense_locked(pico_bridge_state_t *state, int slot_nu
 	bridge_copy_string(state->last_ack_result, sizeof(state->last_ack_result), "pending");
 }
 
+/* ----------------------------------------------------------------------------
+ * bridge_enqueue_dispense_slot_locked()
+ * ----------------------------------------------------------------------------
+ * Adds a slot to the pending-dispense queue rather than sending it
+ * immediately, so a dispense request never gets lost just because another
+ * one is already in flight. Deduplicates: a slot already in flight or
+ * already queued is treated as success without adding a duplicate entry.
+ * Actually starting the dispense is a separate step, see
+ * bridge_start_next_dispense_locked().
+ * ---------------------------------------------------------------------------- */
 bool bridge_enqueue_dispense_slot_locked(pico_bridge_state_t *state, int slot_number, bool is_scheduled)
 {
 	if (state == NULL || bridge_slot_index_from_number(slot_number) < 0) {
@@ -130,6 +163,10 @@ bool bridge_enqueue_dispense_slot_locked(pico_bridge_state_t *state, int slot_nu
 	return true;
 }
 
+/* Pops the front of the dispense queue (FIFO order) and actually starts it,
+ * if nothing is already in flight and the queue isn't empty. Called after
+ * enqueueing a new request and after each dispense completes/times out, so
+ * queued requests get worked through one at a time automatically. */
 bool bridge_start_next_dispense_locked(pico_bridge_state_t *state)
 {
 	int next_slot;
@@ -154,6 +191,11 @@ bool bridge_start_next_dispense_locked(pico_bridge_state_t *state)
 	return true;
 }
 
+/* Sends the full profile (medication name, pill count, dose size, schedule)
+ * for one slot down to the Pico, so its own copy of the profile stays in
+ * sync with whatever was just edited on the dashboard or LCD. Silently
+ * skips slots that aren't active yet or have incomplete data, there's
+ * nothing meaningful to send until a profile is actually filled in. */
 void bridge_send_load_profile_for_slot(const pill_slot_state_t *slot_state)
 {
 	char line[256];
@@ -193,6 +235,9 @@ void bridge_send_load_profile_for_slot(const pill_slot_state_t *slot_state)
 	uart_bridge_send_line(line);
 }
 
+/* Pulls the "slot=N" field out of a raw protocol line, if present.
+ * Returns -1 if there's no slot field at all (not every message type
+ * includes one). */
 static int bridge_extract_slot_number(const char *line)
 {
 	char line_copy[UART_BRIDGE_LINE_SIZE];
@@ -227,6 +272,19 @@ static void bridge_mark_link_alive_locked(pico_bridge_state_t *state)
 	bridge_copy_string(state->controller_transport, sizeof(state->controller_transport), "UART linked");
 }
 
+/* ----------------------------------------------------------------------------
+ * bridge_handle_ack_line()
+ * ----------------------------------------------------------------------------
+ * Parses an "ACK|action=...|slot=...|result=..." line and applies it to
+ * bridge_state. For a DISPENSE ack specifically: on "ok", the slot moves
+ * into "pending pickup" (the motor ran, but nobody has necessarily opened
+ * the drawer yet, see bridge_mark_dispense_taken_locked() in
+ * bridge_state.c for how that gets resolved), fires immediate feedback,
+ * and schedules the pickup reminder. On "fail"/"timeout", it fires failure
+ * feedback only, this slot's own result field already reflects the
+ * failure, nothing else needs to change. Either way, the next queued
+ * dispense (if any) is started once this one resolves.
+ * ---------------------------------------------------------------------------- */
 static void bridge_handle_ack_line(pico_bridge_state_t *state, const char *line)
 {
 	char line_copy[UART_BRIDGE_LINE_SIZE];
@@ -316,6 +374,9 @@ static void bridge_handle_ack_line(pico_bridge_state_t *state, const char *line)
 	bridge_state_save_to_nvs(state);
 }
 
+/* Applies one key=value field from a BOOT_SYNC line to a slot record. Only
+ * covers the subset of fields the Pico actually reports at boot, run
+ * state/dispense results aren't part of BOOT_SYNC. */
 static void bridge_apply_boot_sync_field(pill_slot_state_t *slot_state, const char *key, const char *value)
 {
 	if (strcmp(key, "med") == 0) {
@@ -331,6 +392,10 @@ static void bridge_apply_boot_sync_field(pill_slot_state_t *slot_state, const ch
 	}
 }
 
+/* Applies a "BOOT_SYNC" line, sent once by the Pico right after it boots,
+ * to mirror whatever profile it already has loaded for one slot into the
+ * ESP's own state. This is how the ESP finds out what's configured on the
+ * Pico if the ESP itself rebooted separately and lost its in-RAM copy. */
 static void bridge_handle_boot_sync_line(pico_bridge_state_t *state, const char *line)
 {
 	char line_copy[UART_BRIDGE_LINE_SIZE];
@@ -373,6 +438,10 @@ static void bridge_handle_boot_sync_line(pico_bridge_state_t *state, const char 
 	ESP_LOGI(TAG, "Pico BOOT_SYNC applied for slot %d", slot_number);
 }
 
+/* Applies one key=value field from a STATUS line to a slot record. STATUS
+ * is the Pico's routine "here's my current state" broadcast, so this
+ * covers the full set of live fields, unlike bridge_apply_boot_sync_field
+ * above, including the pill-count low/empty alert check on "left". */
 static void bridge_apply_field(pico_bridge_state_t *state, pill_slot_state_t *slot_state, const char *key, const char *value)
 {
 	if (strcmp(key, "med") == 0) {
@@ -421,6 +490,10 @@ static void bridge_apply_field(pico_bridge_state_t *state, pill_slot_state_t *sl
 	}
 }
 
+/* Parses a full "STATUS|slot=...|med=...|left=...|..." line and applies
+ * every field to the matching slot, then marks the link alive and logs a
+ * history entry. This is the Pico's routine heartbeat/state broadcast,
+ * sent whenever something worth reporting changes. */
 static void bridge_handle_status_line(pico_bridge_state_t *state, const char *line)
 {
 	char line_copy[UART_BRIDGE_LINE_SIZE];
@@ -465,6 +538,15 @@ static void bridge_handle_status_line(pico_bridge_state_t *state, const char *li
 	ESP_LOGI(TAG, "Pico status updated over UART");
 }
 
+/* ----------------------------------------------------------------------------
+ * bridge_process_uart_line()
+ * ----------------------------------------------------------------------------
+ * Entry point for one complete line received from the Pico. Reads the
+ * message type (the text before the first '|') and routes it to the right
+ * handler. TIME_REQ is answered outside the lock since it doesn't touch
+ * shared state; everything else takes bridge_state_mutex for the duration
+ * of applying it.
+ * ---------------------------------------------------------------------------- */
 static void bridge_process_uart_line(char *line)
 {
 	char raw_line[UART_BRIDGE_LINE_SIZE];
@@ -507,9 +589,17 @@ static void bridge_process_uart_line(char *line)
 	xSemaphoreGive(bridge_state_mutex);
 }
 
-/* Checks every active slot's schedule against the current time and enqueues a
- * dispense if a scheduled time matches.  Must be called with the bridge state
- * mutex already held. */
+/* ----------------------------------------------------------------------------
+ * bridge_check_schedule_locked()
+ * ----------------------------------------------------------------------------
+ * Compares the current time against every active slot's schedule string,
+ * and enqueues an auto-dispense for any slot whose scheduled time matches
+ * the current minute. Called once per pass through uart_bridge_task()'s
+ * loop. Tracks the last minute each slot fired so a schedule match can
+ * only queue one dispense per slot per minute, not once per loop
+ * iteration. Skips slots with no schedule, no pills left, or that already
+ * fired this minute. Caller must hold bridge_state_mutex.
+ * ---------------------------------------------------------------------------- */
 static void bridge_check_schedule_locked(pico_bridge_state_t *state)
 {
 	/* Stores the minute-boundary timestamp of the last auto-fire per slot so
@@ -575,6 +665,19 @@ static void bridge_check_schedule_locked(pico_bridge_state_t *state)
 	}
 }
 
+/* ----------------------------------------------------------------------------
+ * uart_bridge_task()
+ * ----------------------------------------------------------------------------
+ * The bridge's main loop, runs forever once started. Each pass:
+ *   1. Reads whatever bytes are available from UART and reassembles them
+ *      into complete lines (newline-delimited), handing each finished
+ *      line to bridge_process_uart_line(). An oversized line is discarded
+ *      rather than allowed to overflow the buffer.
+ *   2. Refreshes the connected flag and checks the dispense schedule.
+ *   3. Sends the periodic SET_TIME heartbeat, unless a dispense is
+ *      currently in flight (see the comment below on why).
+ *   4. Periodically logs a clear, human-readable connection status line.
+ * ---------------------------------------------------------------------------- */
 static void uart_bridge_task(void *arg)
 {
 	char line_buffer[UART_BRIDGE_LINE_SIZE];
@@ -692,6 +795,16 @@ static void uart_bridge_task(void *arg)
 	}
 }
 
+/* ----------------------------------------------------------------------------
+ * start_uart_bridge()
+ * ----------------------------------------------------------------------------
+ * Creates bridge_state_mutex (which the rest of the firmware depends on
+ * existing before they touch bridge_state) and the UART TX mutex, restores
+ * saved state from flash (or resets to defaults on first boot), configures
+ * and installs the UART driver on the pins wired to the Pico, then starts
+ * uart_bridge_task(). Call once at boot, before any other module that
+ * reads or writes bridge_state.
+ * ---------------------------------------------------------------------------- */
 void start_uart_bridge(void)
 {
 	const uart_config_t uart_config = {

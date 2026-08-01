@@ -1,3 +1,12 @@
+/* ============================================================================
+ * UART_BRIDGE.H - Pico Communication Protocol
+ * ----------------------------------------------------------------------------
+ * Public interface to the line-based UART protocol spoken between the ESP
+ * and the Pico 2 controller (CMD|action=... going out, ACK|/STATUS| coming
+ * back). Owns the dispense request queue so multiple slots can be asked to
+ * dispense without losing a request while one is already in flight.
+ * ============================================================================ */
+
 #ifndef UART_BRIDGE_H
 #define UART_BRIDGE_H
 

@@ -1,3 +1,12 @@
+/* ============================================================================
+ * DRAWER_SENSOR.C - Pickup Confirmation Sensor Driver
+ * ----------------------------------------------------------------------------
+ * Polls a hall-effect sensor wired directly to the ESP (independent of the
+ * Pico) that trips when the pill drawer is opened, and reports that event
+ * into the shared bridge_state so a dispensed dose can be marked as
+ * actually picked up.
+ * ============================================================================ */
+
 #include "drawer_sensor.h"
 
 #include "driver/gpio.h"
@@ -15,6 +24,17 @@ static const char *TAG = "time_server";
 #define HALL_TRIGGER_LEVEL 0
 #define HALL_POLL_MS 20
 
+/* ----------------------------------------------------------------------------
+ * drawer_sensor_task()
+ * ----------------------------------------------------------------------------
+ * Polls the sensor pin every HALL_POLL_MS and looks for an edge into the
+ * trigger level (drawer opened). On a trigger, unconditionally calls
+ * bridge_mark_dispense_taken_locked() rather than checking any "is a
+ * dispense pending" flag first, that function already checks each slot's
+ * own state internally and safely does nothing if no slot is actually
+ * waiting on pickup, so there's no need to duplicate that check here.
+ * Runs forever once started.
+ * ---------------------------------------------------------------------------- */
 static void drawer_sensor_task(void *arg)
 {
 	int prev_level;
@@ -31,14 +51,6 @@ static void drawer_sensor_task(void *arg)
 				ESP_LOGI(TAG, "Drawer sensor triggered on GPIO%d", HALL_SIGNAL_PIN);
 				if (bridge_state_mutex != NULL &&
 				    xSemaphoreTake(bridge_state_mutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-					/* Always attempt this rather than gating on the single
-					 * shared awaiting_drawer_open flag, that flag can be
-					 * cleared by an unrelated station's dispense failing
-					 * (see bridge_handle_ack_line()), which would otherwise
-					 * make a real drawer-open event for a still-pending
-					 * station silently do nothing. bridge_mark_dispense_taken_locked()
-					 * already checks each station's own state and safely
-					 * no-ops if nothing is actually pending. */
 					bridge_mark_dispense_taken_locked(&bridge_state);
 					xSemaphoreGive(bridge_state_mutex);
 				}
@@ -49,6 +61,9 @@ static void drawer_sensor_task(void *arg)
 	}
 }
 
+/* Configures the sensor pin as a pulled-up input and starts
+ * drawer_sensor_task(). Call once at boot, after start_uart_bridge() so
+ * bridge_state_mutex already exists. */
 void start_drawer_sensor(void)
 {
 	gpio_config_t cfg = {

@@ -1,3 +1,12 @@
+/* ============================================================================
+ * DRAWER_SENSOR.H - Pickup Confirmation Sensor
+ * ----------------------------------------------------------------------------
+ * Interface to the ESP's own hall-effect sensor (independent of the Pico),
+ * which detects when the physical pill drawer is opened. This is the
+ * ESP's way of confirming a dispensed dose was actually collected, not
+ * just that the motor ran.
+ * ============================================================================ */
+
 #ifndef DRAWER_SENSOR_H
 #define DRAWER_SENSOR_H
 

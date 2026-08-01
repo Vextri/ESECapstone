@@ -1,3 +1,13 @@
+/* ============================================================================
+ * LED_FEEDBACK.C - WS2812 Status LED Driver
+ * ----------------------------------------------------------------------------
+ * Bit-bangs the WS2812 protocol over the RMT (Remote Control) peripheral,
+ * which generates the precisely-timed pulses the LEDs need without tying
+ * up the CPU. A dedicated FreeRTOS task owns all LED state and consumes
+ * events from a queue, so this module never touches hardware directly from
+ * another task's context.
+ * ============================================================================ */
+
 #include "led_feedback.h"
 
 #include <stdbool.h>
@@ -39,6 +49,15 @@ static rmt_channel_handle_t led_rmt_chan;
 static rmt_encoder_handle_t led_rmt_encoder;
 static led_pixel_t led_pixels[LED_COUNT];
 
+/* ----------------------------------------------------------------------------
+ * led_ws2812_show()
+ * ----------------------------------------------------------------------------
+ * Encodes the current led_pixels[] colors into the WS2812's one-wire bit
+ * timing (a short high pulse for a 0 bit, a long high pulse for a 1 bit,
+ * in GRB byte order per LED) and shoots it out over RMT in one burst,
+ * followed by a reset gap. Call this any time led_pixels[] changes to push
+ * that change onto the physical strip.
+ * ---------------------------------------------------------------------------- */
 static void led_ws2812_show(void)
 {
 	static const rmt_symbol_word_t bit0 = {
@@ -72,6 +91,7 @@ static void led_ws2812_show(void)
 	}
 }
 
+/* Bounds-checks a slot number against the physical LED count. */
 static int led_index_from_slot(int slot)
 {
 	if (slot < 0 || slot >= LED_COUNT) {
@@ -81,6 +101,7 @@ static int led_index_from_slot(int slot)
 	return slot;
 }
 
+/* Sets every LED to the same color and pushes it to the strip. */
 static void led_set_all(uint8_t r, uint8_t g, uint8_t b)
 {
 	for (int i = 0; i < LED_COUNT; i++) {
@@ -91,6 +112,14 @@ static void led_set_all(uint8_t r, uint8_t g, uint8_t b)
 	led_ws2812_show();
 }
 
+/* ----------------------------------------------------------------------------
+ * led_apply_base_state()
+ * ----------------------------------------------------------------------------
+ * Renders the LED strip's "resting" appearance between flash events: purple
+ * on the slot being edited if edit mode is active, blue on the slot
+ * currently highlighted by the LCD cursor if one is selected, or all off
+ * otherwise. Edit mode takes priority over plain selection.
+ * ---------------------------------------------------------------------------- */
 static void led_apply_base_state(bool edit_active, int edit_slot, bool slot_selected, int selected_slot)
 {
 	if (edit_active) {
@@ -116,6 +145,9 @@ static void led_apply_base_state(bool edit_active, int edit_slot, bool slot_sele
 	}
 }
 
+/* Blinks the whole strip a fixed color a number of times, blocking the LED
+ * task for the duration. Used for the success/failure result flash after
+ * a dispense attempt. */
 static void led_flash_sequence(uint8_t r, uint8_t g, uint8_t b, int flashes)
 {
 	for (int i = 0; i < flashes; i++) {
@@ -126,6 +158,9 @@ static void led_flash_sequence(uint8_t r, uint8_t g, uint8_t b, int flashes)
 	}
 }
 
+/* Public entry point - pushes an event onto the queue for led_task() to
+ * pick up. Non-blocking: if the queue is momentarily full the event is
+ * dropped and logged rather than stalling the caller. */
 void led_enqueue_event(led_event_t event, int slot)
 {
 	led_event_msg_t msg;
@@ -142,6 +177,14 @@ void led_enqueue_event(led_event_t event, int slot)
 	}
 }
 
+/* ----------------------------------------------------------------------------
+ * led_task()
+ * ----------------------------------------------------------------------------
+ * The sole owner of LED hardware state. Blocks on the event queue and, for
+ * each event, either runs a flash sequence (success/failure) or updates
+ * the persistent edit/selection state and re-renders the resting display.
+ * Runs forever once started.
+ * ---------------------------------------------------------------------------- */
 static void led_task(void *arg)
 {
 	led_event_msg_t msg;
@@ -184,6 +227,8 @@ static void led_task(void *arg)
 	}
 }
 
+/* Sets up the RMT channel and encoder for driving the WS2812 strip, then
+ * launches led_task(). Call once at boot. */
 void start_led_feedback(void)
 {
 	rmt_tx_channel_config_t rmt_chan_cfg;

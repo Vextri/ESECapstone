@@ -7,32 +7,55 @@
 PINOUT SUMMARY
 --------------------------------------------------------------------------------
 
-  GPIO  | Role                          | Driver / Component
-  ------+-------------------------------+------------------------------
-  GPIO1 | DC Motor AIN1 (PWM forward)   | DRV8833 #1 - AIN1
-  GPIO2 | DC Motor AIN2 (PWM backward)  | DRV8833 #1 - AIN2
-  GPIO5 | Piezo sensor input            | Piezo impact sensor
-  GPIO6 | Hall effect sensor input      | Hall effect sensor
-  GPIO7 | IR sensor input               | IR beam-break sensor
-  GPIO8 | Stepper AIN1                  | DRV8833 #2 - AIN1 (Coil A+)
-  GPIO9 | Stepper AIN2                  | DRV8833 #2 - AIN2 (Coil A-)
-  GPIO10| Stepper BIN1                  | DRV8833 #2 - BIN1 (Coil B+)
-  GPIO11| Stepper BIN2                  | DRV8833 #2 - BIN2 (Coil B-)
+  Three bipolar stepper motors now drive dispensing, one per slot, each on
+  its own DRV8833. There is no DC motor in the current build. Full detail
+  (including sensors and free GPIOs) lives in GPIO_PINOUT.txt, summary below:
+
+  GPIO   | Role                          | Driver / Component
+  -------+-------------------------------+------------------------------
+  GPIO8  | Stepper 1 AIN1 (Coil A+)      | DRV8833 - Motor 1 / Slot 0
+  GPIO9  | Stepper 1 AIN2 (Coil A-)      | DRV8833 - Motor 1 / Slot 0
+  GPIO10 | Stepper 1 BIN1 (Coil B+)      | DRV8833 - Motor 1 / Slot 0
+  GPIO11 | Stepper 1 BIN2 (Coil B-)      | DRV8833 - Motor 1 / Slot 0
+  GPIO6  | Stepper 2 AIN1 (Coil A+)      | DRV8833 - Motor 2 / Slot 1
+  GPIO4  | Stepper 2 AIN2 (Coil A-)      | DRV8833 - Motor 2 / Slot 1
+  GPIO27 | Stepper 2 BIN1 (Coil B+)      | DRV8833 - Motor 2 / Slot 1
+  GPIO28 | Stepper 2 BIN2 (Coil B-)      | DRV8833 - Motor 2 / Slot 1
+  GPIO12 | Stepper 3 AIN1 (Coil A+)      | DRV8833 - Motor 3 / Slot 2
+  GPIO13 | Stepper 3 AIN2 (Coil A-)      | DRV8833 - Motor 3 / Slot 2
+  GPIO14 | Stepper 3 BIN1 (Coil B+)      | DRV8833 - Motor 3 / Slot 2
+  GPIO15 | Stepper 3 BIN2 (Coil B-)      | DRV8833 - Motor 3 / Slot 2
+  GPIO5  | Piezo sensor input            | Piezo impact sensor (Slot 0)
+  GPIO7  | IR sensor input               | IR beam-break sensor (Slot 0)
 
   Notes:
-  - DC Motor uses PWM on GPIO1/GPIO2 via DRV8833 #1. MOTOR_SPEED = 900 (90%).
-  - Stepper uses full-step bipolar drive via DRV8833 #2. Step delay = 3000us.
-  - Sensors on GPIO5-7 use interrupt-driven edge detection with debounce.
+  - The board has 4 stepper driver positions (DRV1-4), one per motor
+    connector, but only 3 slots. Normal layout is driver-number-matches-
+    slot-number (DRV1->Slot0, DRV2->Slot1, DRV3->Slot2). Slot 1 currently
+    runs on DRV4 (GPIO4/6/27/28) instead of DRV2 (GPIO0-3), since that
+    DRV2 unit had issues, DRV4 was the spare position and got wired in as
+    a substitute. GPIO0-3 are unused as a result. Motor 2's AIN1/AIN2 are
+    swapped in software relative to the driver's physical IN1/IN2
+    labeling to correct its rotation direction. GPIO6 (DRV4's IN2) was
+    used for early sensor testing at one point but has not been a real
+    hall-effect input for a long time, it's simply a driver line now.
+  - Each motor now has its own step delay rather than one shared rate:
+    Motor 1 = 5600us/step, Motor 2 = 5600us/step, Motor 3 = 2000us/step
+    (STEPPER_STEP_DELAY_US_MOTOR_1/2/3 in stepper_control.h).
+  - Sensors use interrupt-driven edge detection with debounce.
+  - Hall-effect drawer sensors (3, one per slot per the PCB layout) are
+    wired to the ESP32 (GPIO33/34/35), not the Pico.
 
 --------------------------------------------------------------------------------
 HARDWARE OVERVIEW
 --------------------------------------------------------------------------------
 
-  [Pico] -- GPIO1/2 --> [DRV8833 #1] --> [DC Disc Motor]
-  [Pico] -- GPIO8-11 -> [DRV8833 #2] --> [Bipolar Stepper Motor]
-  [Pico] <-- GPIO5 --- [Piezo Sensor]        (pull-up, falling edge trigger)
-  [Pico] <-- GPIO6 --- [Hall Effect Sensor]  (pull-up, falling edge trigger)
-  [Pico] <-- GPIO7 --- [IR Beam-Break]       (pull-up, falling/rising trigger)
+  [Pico] -- GPIO8-11      --> [DRV1] --> [Stepper Motor 1 / Slot 0]
+  [Pico] -- GPIO4,6,27,28 --> [DRV4] --> [Stepper Motor 2 / Slot 1] (substitute for DRV2)
+  [Pico] -- GPIO12-15     --> [DRV3] --> [Stepper Motor 3 / Slot 2]
+  [Pico] <-- GPIO5 --- [Piezo Sensor]  (pull-up, falling edge trigger)
+  [Pico] <-- GPIO7 --- [IR Beam-Break] (pull-up, falling/rising trigger)
+  [Pico] <-> UART1 (GPIO20/21) <-> [ESP32-S3] (see ESPCode/Server/README.txt)
 
 --------------------------------------------------------------------------------
 CODE FLOW
@@ -169,7 +192,8 @@ STEPPER MOTOR DRIVE PATTERN (Full-Step Bipolar)
 
   Forward:  0 -> 1 -> 2 -> 3 -> 0 ...
   Backward: 0 -> 3 -> 2 -> 1 -> 0 ...
-  Step rate: 3000us/step (~333 steps/sec)
+  Step rate is per-motor now, not a single shared value, see the notes
+  under PINOUT SUMMARY above.
 
 --------------------------------------------------------------------------------
 FILE STRUCTURE

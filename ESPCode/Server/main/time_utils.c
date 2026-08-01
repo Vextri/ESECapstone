@@ -1,3 +1,7 @@
+/* ============================================================================
+ * TIME_UTILS.C - Clock and Schedule Helpers
+ * ============================================================================ */
+
 #include "time_utils.h"
 
 #include <stdio.h>
@@ -10,6 +14,9 @@
 
 static const char *TAG = "time_server";
 
+/* Configures the C library's timezone so every localtime_r() call in the
+ * firmware reports US Eastern with correct DST, rather than UTC. Must run
+ * once at boot before anything reads the clock. */
 void time_utils_init(void)
 {
 	/* POSIX TZ format: STD offset DST[,rule]. EST5EDT = Eastern Standard is
@@ -22,6 +29,15 @@ void time_utils_init(void)
 	ESP_LOGI(TAG, "Timezone set to US Eastern (EST5EDT)");
 }
 
+/* ----------------------------------------------------------------------------
+ * screen_parse_hhmm()
+ * ----------------------------------------------------------------------------
+ * Parses one schedule time token into minutes-since-midnight. Accepts a
+ * range of formats a user might type or an older schedule string might
+ * contain: "08:00", "8:00am", "8.00PM", or bare "20" (hour only). Case-
+ * insensitive, tolerates leading/trailing whitespace. Returns false and
+ * leaves *minutes_out untouched if the token isn't a recognizable time.
+ * ---------------------------------------------------------------------------- */
 bool screen_parse_hhmm(const char *token, int *minutes_out)
 {
 	char local[24];
@@ -121,6 +137,17 @@ bool screen_parse_hhmm(const char *token, int *minutes_out)
 	return true;
 }
 
+/* ----------------------------------------------------------------------------
+ * screen_get_next_dispense_string()
+ * ----------------------------------------------------------------------------
+ * Scans every active slot's schedule and works out which dose time is
+ * coming up soonest from right now, wrapping around to tomorrow if every
+ * scheduled time today has already passed. If more than one slot shares
+ * that same next time, all of them are listed together (e.g. "8:00 AM FOR
+ * S0&S2"). Writes "NO SCHEDULE" if nothing is scheduled, or "SYNC TIME" if
+ * the clock hasn't been set yet and there's no reliable "now" to compare
+ * against.
+ * ---------------------------------------------------------------------------- */
 void screen_get_next_dispense_string(const pico_bridge_state_t *snapshot, char *out, size_t out_len)
 {
 	time_t now;
@@ -226,6 +253,9 @@ void screen_get_next_dispense_string(const pico_bridge_state_t *snapshot, char *
 	return;
 }
 
+/* Formats the current local time for display. Falls back to reporting
+ * uptime instead if the clock has never been synced, so the dashboard
+ * shows something meaningful rather than a bogus 1970 date. */
 void get_device_time_string(char *out, size_t out_len)
 {
 	time_t now = time(NULL);
@@ -240,6 +270,10 @@ void get_device_time_string(char *out, size_t out_len)
 	snprintf(out, out_len, "Time not set (uptime %llds)", (long long)uptime_seconds);
 }
 
+/* Sanity check for "has the clock ever been set". An un-synced ESP boots
+ * with its clock near the Unix epoch (1970), so any timestamp after a
+ * fixed recent cutoff (well past this firmware's release) is treated as
+ * evidence a real sync has happened. */
 bool bridge_is_time_valid(void)
 {
 	time_t now = time(NULL);
@@ -247,6 +281,8 @@ bool bridge_is_time_valid(void)
 	return now > 1700000000;
 }
 
+/* Applies a Unix epoch (from NTP sync or a manual "Sync Clock" request) to
+ * the system clock. */
 bool bridge_set_local_time(time_t epoch)
 {
 	struct timeval now = {

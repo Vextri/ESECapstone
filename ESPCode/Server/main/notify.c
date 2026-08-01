@@ -1,4 +1,14 @@
-/* PortaPill Caretaker Notification System. See notify.h for an overview. */
+/* ============================================================================
+ * NOTIFY.C - Caretaker Notification System
+ * ----------------------------------------------------------------------------
+ * See notify.h for the public API and overview. This file owns the
+ * per-slot reminder timers, the outbound send queue and its consumer task,
+ * and the actual HTTPS POST to ntfy.sh. Sends are queued rather than made
+ * inline specifically so a caller holding bridge_state_mutex (a STATUS
+ * line update, a dispense ACK) is never blocked on a multi-second network
+ * call, that queue/task split is what keeps the rest of the firmware
+ * responsive while a notification is in flight.
+ * ============================================================================ */
 
 #include "notify.h"
 
@@ -44,6 +54,9 @@ typedef struct {
 
 static QueueHandle_t s_notify_queue;
 
+/* Minimal event logger for the HTTP client, just enough to see connection
+ * problems in the log; the actual response is checked separately after
+ * esp_http_client_perform() returns. */
 static esp_err_t notify_http_event_handler(esp_http_client_event_t *evt)
 {
 	switch (evt->event_id) {
@@ -101,6 +114,10 @@ static void notify_send_blocking(const char *title, const char *body)
 	esp_http_client_cleanup(client);
 }
 
+/* Consumer side of s_notify_queue: blocks waiting for a message, then sends
+ * it, one at a time, forever. Running this on its own task is what lets
+ * notify_send() be called safely from anywhere without ever blocking the
+ * caller on network I/O. */
 static void notify_task(void *arg)
 {
 	notify_msg_t msg;
@@ -134,6 +151,17 @@ static void notify_send(const char *title, const char *body)
 	}
 }
 
+/* ----------------------------------------------------------------------------
+ * reminder_timer_callback()
+ * ----------------------------------------------------------------------------
+ * Fires once per armed reminder stage. arg packs both the slot and the
+ * stage index together (slot * NOTIFY_REMINDER_STAGE_COUNT + stage) since
+ * esp_timer only passes a single void* per timer. Re-checks this slot's
+ * own live pickup state before sending anything, a pickup confirmed
+ * between when the timer was armed and now means this reminder is no
+ * longer needed. Wording escalates by stage, from a gentle first check-in
+ * to an urgent final one.
+ * ---------------------------------------------------------------------------- */
 static void reminder_timer_callback(void *arg)
 {
 	int packed = (int)(intptr_t)arg;
@@ -189,11 +217,15 @@ static void reminder_timer_callback(void *arg)
 	notify_send("PortaPill: Pickup Not Confirmed", body);
 }
 
+/* Fires an immediate test notification, no delay, no dispense required. */
 void notify_send_test(void)
 {
 	notify_send("PortaPill Test", "This is a test notification from your pill dispenser. If you can read this, push notifications are working.");
 }
 
+/* Fires a low-supply or out-of-pills alert exactly once, on the transition
+ * into that state, rather than every time the pill count happens to be
+ * reported while already low. See notify.h for the full rationale. */
 void notify_check_pill_level(int slot, const char *medication_name, int old_left, int new_left)
 {
 	char body[160];
@@ -216,6 +248,9 @@ void notify_check_pill_level(int slot, const char *medication_name, int old_left
 	}
 }
 
+/* Confirms a scheduled dose went out. Only called for schedule-triggered
+ * dispenses, see notify.h, a manual test dispense should never page a
+ * caretaker's phone. */
 void notify_send_dispensed(int slot, const char *medication_name)
 {
 	char body[128];
@@ -245,6 +280,8 @@ const char *notify_get_subscribe_url(void)
 	return url;
 }
 
+/* Creates every per-slot, per-stage reminder timer up front (all start
+ * idle/unarmed) and the send queue + task pair. Call once at boot. */
 void notify_init(void)
 {
 	for (int slot = 0; slot < PILL_SLOT_COUNT; slot++) {
@@ -272,6 +309,9 @@ void notify_init(void)
 		 NOTIFY_REMINDER_STAGE_COUNT, s_reminder_delay_min[0]);
 }
 
+/* Arms (or re-arms) every reminder stage for a slot right after a
+ * successful dispense. See notify.h for the full behavior, this restarts
+ * rather than stacks if called again before the previous set has fired. */
 void notify_schedule_dispense_reminder(int slot, const char *medication_name, time_t dispensed_at)
 {
 	if (slot < 0 || slot >= PILL_SLOT_COUNT) {

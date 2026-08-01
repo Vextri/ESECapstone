@@ -1,3 +1,12 @@
+/* ============================================================================
+ * TIME_UTILS.H - Clock and Schedule Helpers
+ * ----------------------------------------------------------------------------
+ * Small, self-contained helpers for everything time-related: setting the
+ * local timezone, reading/writing the system clock, and parsing/formatting
+ * the schedule strings used by profiles ("08:00,20:00") and the LCD's next-
+ * dispense line. Has no state of its own beyond the system clock.
+ * ============================================================================ */
+
 #ifndef TIME_UTILS_H
 #define TIME_UTILS_H
 

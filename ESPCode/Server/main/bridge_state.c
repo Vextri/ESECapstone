@@ -1,3 +1,12 @@
+/* ============================================================================
+ * BRIDGE_STATE.C - Shared State Storage and Persistence
+ * ----------------------------------------------------------------------------
+ * Owns the actual bridge_state_mutex and bridge_state instances declared in
+ * bridge_state.h, plus the helpers for saving/restoring that state to flash
+ * (NVS) so profiles and pill counts survive a reboot or power loss, and for
+ * recording history entries and resolving dispense completion/timeout.
+ * ============================================================================ */
+
 #include "bridge_state.h"
 
 #include <string.h>
@@ -19,6 +28,14 @@ static const char *TAG = "time_server";
 SemaphoreHandle_t bridge_state_mutex;
 pico_bridge_state_t bridge_state;
 
+/* ----------------------------------------------------------------------------
+ * bridge_copy_string()
+ * ----------------------------------------------------------------------------
+ * Safe bounded string copy used everywhere a fixed-size field in
+ * pico_bridge_state_t is written from a possibly-untrusted or possibly-NULL
+ * source (a UART field, an HTTP request body). Always null-terminates
+ * within dest_size and never overruns the buffer.
+ * ---------------------------------------------------------------------------- */
 void bridge_copy_string(char *dest, size_t dest_size, const char *src)
 {
 	if (dest_size == 0) {
@@ -34,6 +51,11 @@ void bridge_copy_string(char *dest, size_t dest_size, const char *src)
 	dest[dest_size - 1] = '\0';
 }
 
+/* Validates a slot number and converts it to an array index. Slot numbers
+ * currently map 1:1 to their index, but callers should always go through
+ * this function rather than indexing slots[] directly, so a future change
+ * to that mapping only needs to happen in one place. Returns -1 for an
+ * out-of-range number. */
 int bridge_slot_index_from_number(int slot_number)
 {
 	if (slot_number < 0 || slot_number >= PILL_SLOT_COUNT) {
@@ -43,6 +65,9 @@ int bridge_slot_index_from_number(int slot_number)
 	return slot_number;
 }
 
+/* Returns the slot record for whichever slot is currently marked active on
+ * the Pico side. Falls back to slot 0 if active_profile_slot is somehow out
+ * of range, so callers never have to null-check the result. */
 const pill_slot_state_t *bridge_get_active_slot_const(const pico_bridge_state_t *state)
 {
 	int slot_index = bridge_slot_index_from_number(state->active_profile_slot);
@@ -54,6 +79,21 @@ const pill_slot_state_t *bridge_get_active_slot_const(const pico_bridge_state_t 
 	return &state->slots[slot_index];
 }
 
+/* ----------------------------------------------------------------------------
+ * bridge_state_save_to_nvs() / bridge_state_load_from_nvs()
+ * ----------------------------------------------------------------------------
+ * Persists the whole bridge_state struct as a single binary blob in flash
+ * (NVS), and restores it on the next boot so slot profiles, pill counts,
+ * and schedules aren't lost on a power cycle. Save is called after any
+ * change worth remembering (a profile edit, a completed dispense); load
+ * runs once at startup.
+ *
+ * load_from_nvs() also tolerates a blob saved by an older firmware build
+ * that didn't yet have the dispense-queue fields: min_legacy_size is the
+ * offset of the first queue field, so a shorter-than-current blob is still
+ * accepted as long as it covers everything before that point, and the
+ * queue fields are simply reset to empty for that boot.
+ * ---------------------------------------------------------------------------- */
 bool bridge_state_save_to_nvs(const pico_bridge_state_t *state)
 {
 	nvs_handle_t handle;
@@ -112,6 +152,9 @@ bool bridge_state_load_from_nvs(pico_bridge_state_t *state)
 	return true;
 }
 
+/* Resets one slot to its "never configured" placeholder state, shown on
+ * the dashboard/LCD until real data arrives from the Pico or a profile is
+ * saved by the user. */
 static void bridge_reset_slot_defaults(pill_slot_state_t *slot_state, int slot_number)
 {
 	slot_state->pills_left = -1;
@@ -130,6 +173,9 @@ static void bridge_reset_slot_defaults(pill_slot_state_t *slot_state, int slot_n
 	slot_state->is_active = false;
 }
 
+/* Resets the entire shared state to defaults - every slot, the history log,
+ * and the dispense-tracking fields. Used on first boot (no saved NVS blob
+ * yet) and whenever a loaded blob fails validation. */
 void bridge_state_reset_defaults(pico_bridge_state_t *state)
 {
 	int slot_index;
@@ -151,6 +197,11 @@ void bridge_state_reset_defaults(pico_bridge_state_t *state)
 	state->last_update_us = 0;
 }
 
+/* Appends one entry to the history ring buffer for slot_state's current
+ * result. Once the buffer reaches DISPENSE_HISTORY_COUNT entries, the
+ * oldest one is dropped (shifted out) to make room, so this always holds
+ * the most recent N events regardless of how long the device has been
+ * running. Caller must hold bridge_state_mutex. */
 void bridge_log_status_locked(pico_bridge_state_t *state, const pill_slot_state_t *slot_state)
 {
 	int write_index;
@@ -179,6 +230,19 @@ void bridge_log_status_locked(pico_bridge_state_t *state, const pill_slot_state_
 				 slot_state->last_event);
 }
 
+/* ----------------------------------------------------------------------------
+ * bridge_mark_dispense_taken_locked()
+ * ----------------------------------------------------------------------------
+ * Called from drawer_sensor.c when the hall sensor detects the drawer
+ * opening. Confirms pickup for every slot currently waiting on it, marking
+ * each "ok", logging a history entry, and playing success feedback once.
+ *
+ * All three slots share one physical drawer and one hall sensor, so a
+ * single open event has to resolve every slot whose result is still
+ * "pending", not just the most recently dispensed one, otherwise dispensing
+ * two stations close together would leave the earlier one stuck waiting
+ * forever. Caller must hold bridge_state_mutex.
+ * ---------------------------------------------------------------------------- */
 void bridge_mark_dispense_taken_locked(pico_bridge_state_t *state)
 {
 	int cleared_count = 0;
@@ -196,14 +260,6 @@ void bridge_mark_dispense_taken_locked(pico_bridge_state_t *state)
 	have_time_str = localtime_r(&now, &timeinfo) != NULL &&
 			strftime(time_buf, sizeof(time_buf), "%Y-%m-%d %H:%M:%S", &timeinfo) > 0;
 
-	/* One physical drawer/hall sensor serves every station, so a single
-	 * drawer-open event must confirm every dispense currently pending
-	 * pickup, not just the most recently dispensed one. Previously this
-	 * only cleared whichever single slot was last remembered in
-	 * drawer_open_slot, so dispensing two stations close together left
-	 * the earlier one stuck on "pending" forever, since opening the
-	 * drawer again did nothing once awaiting_drawer_open had already
-	 * been cleared by the first confirmation. */
 	for (int i = 0; i < PILL_SLOT_COUNT; i++) {
 		pill_slot_state_t *slot_state = &state->slots[i];
 
@@ -236,6 +292,16 @@ void bridge_mark_dispense_taken_locked(pico_bridge_state_t *state)
 	}
 }
 
+/* ----------------------------------------------------------------------------
+ * bridge_update_connected_flag_locked()
+ * ----------------------------------------------------------------------------
+ * Called on every pass through the UART bridge's main loop. Recomputes
+ * bridge_state.connected from how recently a message was last heard from
+ * the Pico, and separately checks whether the current dispense has been
+ * waiting past its ACK deadline, if so, gives up on it, records the
+ * timeout as a failed dispense in history, and moves on to the next queued
+ * dispense (if any). Caller must hold bridge_state_mutex.
+ * ---------------------------------------------------------------------------- */
 void bridge_update_connected_flag_locked(void)
 {
 	int64_t age_us = esp_timer_get_time() - bridge_state.last_update_us;

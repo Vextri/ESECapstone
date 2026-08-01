@@ -9,11 +9,18 @@
   GPIO 11  ->  DRV8833 BIN2  (Coil B-)
 
 --- STEPPER MOTOR 2 (Dispenser 2 / Slot 1) ---
-  GPIO  6  ->  DRV8833 AIN1  (Coil A+)  [formerly Hall effect pin, retired]
+  Runs on the PCB's DRV4 driver position, not DRV2. DRV2 (GP0-3) is the
+  position that matches Slot 1 in the board's normal driver-number-per-slot
+  layout, but was swapped out for the spare DRV4 position due to issues
+  with that DRV2 unit. GP0-3 are unused as a result, see FREE GPIOs below.
+
+  GPIO  6  ->  DRV8833 AIN1  (Coil A+)
   GPIO  4  ->  DRV8833 AIN2  (Coil A-)
   GPIO 27  ->  DRV8833 BIN1  (Coil B+)
   GPIO 28  ->  DRV8833 BIN2  (Coil B-)
-  (AIN1/AIN2 swapped in software vs. driver IN1/IN2 order to fix direction)
+  (AIN1/AIN2 swapped in software vs. driver IN1/IN2 order to fix direction.
+  GP6 was only ever wired up for early testing, never a production sensor,
+  it's simply DRV4's IN2 line on the schematic.)
 
 --- STEPPER MOTOR 3 (Dispenser 3 / Slot 2) ---
   GPIO 12  ->  DRV8833 AIN1  (Coil A+)
@@ -28,9 +35,8 @@
   GPIO 17  ->  IR sensor       (Slot 1)
   GPIO 18  ->  Piezo sensor    (Slot 2)
   GPIO 19  ->  IR sensor       (Slot 2)
-  GPIO  6  ->  RETIRED (was hall effect sensor, now Motor 2 AIN2). Hall
-               sensors are physically on GP33/34/35 now, not wired into
-               this firmware yet.
+  Hall effect drawer sensors (3, one per slot) are wired directly to the
+  ESP32, not the Pico: GPIO33/34/35 on the ESP. See ESPCode/Server/README.txt.
 
 --- ESP UART (uart1) ---
   GPIO 21  ->  TX  (Pico -> ESP)
@@ -48,6 +54,10 @@
 ============================================================
   FREE / UNASSIGNED GPIOs
 ============================================================
+  GPIO  0  (was DRV2 IN1, unused now Slot 1 runs on DRV4)
+  GPIO  1  (was DRV2 IN2, unused now Slot 1 runs on DRV4)
+  GPIO  2  (was DRV2 IN3, unused now Slot 1 runs on DRV4)
+  GPIO  3  (was DRV2 IN4, unused now Slot 1 runs on DRV4)
   GPIO 22
   GPIO 26  (ADC capable)
 

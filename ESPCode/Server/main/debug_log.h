@@ -1,3 +1,12 @@
+/* ============================================================================
+ * DEBUG_LOG.H - Remote Log Capture
+ * ----------------------------------------------------------------------------
+ * Mirrors every ESP_LOGx line into an in-RAM ring buffer so the recent log
+ * history can be pulled over Wi-Fi (see web_server.c's /api/debug-log
+ * route) instead of requiring a USB cable, useful once the board is inside
+ * a sealed enclosure.
+ * ============================================================================ */
+
 #ifndef DEBUG_LOG_H
 #define DEBUG_LOG_H
 

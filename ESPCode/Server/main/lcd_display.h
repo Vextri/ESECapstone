@@ -1,3 +1,13 @@
+/* ============================================================================
+ * LCD_DISPLAY.H - On-Device Touchscreen UI
+ * ----------------------------------------------------------------------------
+ * Drives the ST7796 LCD and the physical 5-way button pad, giving the
+ * dispenser a full on-device menu system: live status, per-slot editing
+ * (name, schedule, pill count), manual dispense with a confirm step, and
+ * feedback screens for the result. Works entirely standalone, no network
+ * connection required.
+ * ============================================================================ */
+
 #ifndef LCD_DISPLAY_H
 #define LCD_DISPLAY_H
 

@@ -1,3 +1,12 @@
+/* ============================================================================
+ * AUDIO_FEEDBACK.H - I2S Tone Playback
+ * ----------------------------------------------------------------------------
+ * Plays short melodic tones over I2S (success chime, failure buzz, edit-
+ * mode cue) using a synthesized sine wave rather than any pre-recorded
+ * audio file. Events are queued, same pattern as led_feedback, so any task
+ * can request a sound without owning the I2S peripheral itself.
+ * ============================================================================ */
+
 #ifndef AUDIO_FEEDBACK_H
 #define AUDIO_FEEDBACK_H
 
@@ -35,6 +44,8 @@ extern "C" {
 #define AUDIO_FREQ_A4   440.00f
 #define AUDIO_FREQ_C5   523.25f
 
+/* One note in a melody: a frequency in Hz (0 = silent rest) held for a
+ * duration in milliseconds. */
 typedef struct {
     float freq;
     int dur_ms;
@@ -46,7 +57,12 @@ typedef enum {
     AUDIO_EVENT_EDIT_BEGIN = 3,
 } audio_event_t;
 
+/* Queues a tone event for playback. Safe to call from any task; never
+ * blocks. */
 void audio_enqueue_event(audio_event_t event);
+
+/* Initializes the I2S peripheral and starts the task that consumes queued
+ * events. Call once at boot. */
 void start_audio_feedback(void);
 
 #ifdef __cplusplus

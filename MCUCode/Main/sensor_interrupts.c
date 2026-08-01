@@ -170,8 +170,9 @@ void sensor_interrupts_init(void) {
         gpio_pull_up(ir_slot_pins[slot]);  // IR sensor active low (beam broken = LOW)
     }
 
-    // Hall effect sensor on GPIO6 is retired: that pin now belongs to the
-    // Motor 2 (Slot 2) stepper driver, see stepper_control.c. Not claimed
+    // GPIO6 was only ever wired up for early sensor testing, not a real
+    // production hall sensor. It now belongs to the Motor 2 (Slot 1)
+    // stepper driver (DRV4), see stepper_control.c. Not claimed
     // here anymore so it's free for stepper_init() to own as an output.
 
     // Register unified callback (SDK only allows one global GPIO handler)
@@ -208,7 +209,7 @@ void sensor_interrupts_init(void) {
         printf("  Slot %d: Piezo GPIO %d, IR GPIO %d\n",
                slot, piezo_slot_pins[slot], ir_slot_pins[slot]);
     }
-    printf("  Hall effect sensor: retired (GPIO %d now used by Motor 2 stepper)\n", HALL_EFFECT_PIN);
+    printf("  Hall effect sensor: not connected here (GPIO %d used by Motor 2 stepper/DRV4)\n", HALL_EFFECT_PIN);
 }
 
 // === SLOT-INDEXED PIEZO FUNCTIONS ===

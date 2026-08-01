@@ -1,3 +1,16 @@
+/* ============================================================================
+ * BRIDGE_STATE.H - Shared Dispenser State
+ * ----------------------------------------------------------------------------
+ * Defines pico_bridge_state_t, the single in-RAM record of everything the
+ * ESP knows about the dispenser: each slot's medication and pill count, the
+ * status of the currently in-flight dispense, and recent history. Every
+ * other module (uart_bridge, web_server, lcd_display, notify, drawer_sensor)
+ * reads and writes through this one shared struct, so it is the source of
+ * truth for the whole system. Access must always be guarded by
+ * bridge_state_mutex, this header does not enforce that, callers are
+ * responsible for taking/releasing the lock around any read or write.
+ * ============================================================================ */
+
 #ifndef BRIDGE_STATE_H
 #define BRIDGE_STATE_H
 
@@ -18,6 +31,14 @@ extern "C" {
 #define DISPENSE_HISTORY_COUNT 16
 #define LOW_PILL_THRESHOLD 5
 
+/* ----------------------------------------------------------------------------
+ * pill_slot_state_t
+ * ----------------------------------------------------------------------------
+ * One dispenser slot's full profile: what medication is loaded, how many
+ * pills are left, the dose schedule, and the outcome of its most recent
+ * dispense attempt. has_data distinguishes an empty slot from a real one;
+ * is_active marks whether the slot is currently enabled for scheduling.
+ * ---------------------------------------------------------------------------- */
 typedef struct {
 	int pills_left;
 	int pills_per_dose;
@@ -35,6 +56,13 @@ typedef struct {
 	bool is_active;
 } pill_slot_state_t;
 
+/* ----------------------------------------------------------------------------
+ * dispense_history_entry_t
+ * ----------------------------------------------------------------------------
+ * One row of the dispense log shown on the dashboard's history tab. A
+ * fixed-size ring of DISPENSE_HISTORY_COUNT of these is kept per device,
+ * oldest entries drop off once it fills.
+ * ---------------------------------------------------------------------------- */
 typedef struct {
 	int slot_number;
 	int pills_left_after;
@@ -44,6 +72,17 @@ typedef struct {
 	char event[96];
 } dispense_history_entry_t;
 
+/* ----------------------------------------------------------------------------
+ * pico_bridge_state_t
+ * ----------------------------------------------------------------------------
+ * The full shared state record. Beyond the per-slot data, this tracks the
+ * live status of the UART link to the Pico (connected, last ACK) and the
+ * state machine for a dispense currently in progress: which slot is
+ * running, whether it is still waiting on an ACK from the Pico, and
+ * whether it is still waiting on the drawer to be opened for pickup
+ * confirmation. A small FIFO queue (dispense_queue) lets more than one
+ * slot's dispense be requested back to back without losing a request.
+ * ---------------------------------------------------------------------------- */
 typedef struct {
 	bool connected;
 	int active_profile_slot;

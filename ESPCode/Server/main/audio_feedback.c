@@ -1,3 +1,12 @@
+/* ============================================================================
+ * AUDIO_FEEDBACK.C - I2S Tone Synthesis and Playback
+ * ----------------------------------------------------------------------------
+ * Generates each note as a sine wave sample-by-sample and streams it to a
+ * speaker/amplifier over I2S, no audio files or codecs involved. A
+ * dedicated task owns the I2S channel and plays queued melodies to
+ * completion one at a time.
+ * ============================================================================ */
+
 #include "audio_feedback.h"
 
 #include <math.h>
@@ -7,6 +16,8 @@
 
 static const char *TAG = "time_server";
 
+/* Short melodies for each feedback event, as (frequency, duration) note
+ * pairs. Purely a musical/creative choice, doesn't affect functionality. */
 static const audio_note_t success_melody[] = {
     {AUDIO_FREQ_C4, AUDIO_NOTE_EIGHTH_MS},
     {AUDIO_FREQ_E4, AUDIO_NOTE_EIGHTH_MS},
@@ -31,6 +42,9 @@ static const audio_note_t edit_start_melody[] = {
 static QueueHandle_t audio_event_queue;
 static i2s_chan_handle_t audio_i2s_tx;
 
+/* Writes dur_ms worth of zero samples to the I2S channel. Used for the
+ * short gap between notes so consecutive notes of the same pitch are
+ * still audible as separate beats rather than blurring together. */
 static void audio_play_silence(i2s_chan_handle_t tx, int dur_ms)
 {
     int16_t buf[AUDIO_BUFFER_SAMPLES * 2] = {0};
@@ -44,6 +58,16 @@ static void audio_play_silence(i2s_chan_handle_t tx, int dur_ms)
     }
 }
 
+/* ----------------------------------------------------------------------------
+ * audio_play_note()
+ * ----------------------------------------------------------------------------
+ * Synthesizes and streams one note: a sine wave at freq Hz, generated
+ * sample-by-sample and written to I2S in small chunks so only a small
+ * buffer is needed regardless of note length. A short silent gap is
+ * inserted at the end of the note (see audio_play_silence) so back-to-back
+ * notes stay distinguishable. freq of 0 produces a silent rest instead of
+ * a tone.
+ * ---------------------------------------------------------------------------- */
 static void audio_play_note(i2s_chan_handle_t tx, float freq, int dur_ms)
 {
     int tone_ms = dur_ms > 25 ? (dur_ms - 20) : dur_ms;
@@ -74,6 +98,7 @@ static void audio_play_note(i2s_chan_handle_t tx, float freq, int dur_ms)
     }
 }
 
+/* Plays a full melody note-by-note, in order, blocking until finished. */
 static void audio_play_melody(i2s_chan_handle_t tx, const audio_note_t *notes, size_t count)
 {
     for (size_t i = 0; i < count; i++) {
@@ -81,6 +106,8 @@ static void audio_play_melody(i2s_chan_handle_t tx, const audio_note_t *notes, s
     }
 }
 
+/* Blocks on the event queue and plays the matching melody for whichever
+ * event arrives, one at a time. Runs forever once started. */
 static void audio_task(void *arg)
 {
     audio_event_t event;
@@ -101,6 +128,9 @@ static void audio_task(void *arg)
     }
 }
 
+/* Public entry point - pushes an event onto the queue for audio_task() to
+ * pick up. Non-blocking: if the queue is momentarily full the event is
+ * dropped and logged rather than stalling the caller. */
 void audio_enqueue_event(audio_event_t event)
 {
     if (audio_event_queue == NULL) {
@@ -112,6 +142,8 @@ void audio_enqueue_event(audio_event_t event)
     }
 }
 
+/* Configures the I2S peripheral in standard stereo mode and starts
+ * audio_task(). Call once at boot. */
 void start_audio_feedback(void)
 {
     i2s_chan_config_t chan_cfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);

@@ -1,3 +1,12 @@
+/* ============================================================================
+ * DEBUG_LOG.C - Remote Log Capture Implementation
+ * ----------------------------------------------------------------------------
+ * Hooks into ESP-IDF's logging system at the vprintf level, the lowest
+ * common point every ESP_LOGx call passes through, so nothing needs to
+ * change anywhere else in the firmware for its log lines to also land
+ * here.
+ * ============================================================================ */
+
 #include "debug_log.h"
 
 #include <stdarg.h>
@@ -41,6 +50,15 @@ static void debug_log_append(const char *data, size_t len)
 	s_len += len;
 }
 
+/* ----------------------------------------------------------------------------
+ * debug_log_vprintf()
+ * ----------------------------------------------------------------------------
+ * Replaces ESP-IDF's default log output function (installed via
+ * esp_log_set_vprintf() in debug_log_init()). Formats the line, appends it
+ * to the ring buffer, then always forwards to the original vprintf so the
+ * USB serial console keeps working exactly as before, this only adds a
+ * second destination for the same output.
+ * ---------------------------------------------------------------------------- */
 static int debug_log_vprintf(const char *fmt, va_list args)
 {
 	char line[256];
@@ -69,12 +87,16 @@ static int debug_log_vprintf(const char *fmt, va_list args)
 	return s_original_vprintf != NULL ? s_original_vprintf(fmt, args) : len;
 }
 
+/* Installs debug_log_vprintf() as the system's log output function. Call
+ * once at boot, as early as possible so nothing before it is missed. */
 void debug_log_init(void)
 {
 	s_mutex = xSemaphoreCreateMutex();
 	s_original_vprintf = esp_log_set_vprintf(debug_log_vprintf);
 }
 
+/* Copies the buffer's current contents out for the /api/debug-log HTTP
+ * handler to serve. */
 size_t debug_log_snapshot(char *out, size_t out_size)
 {
 	size_t copied;
