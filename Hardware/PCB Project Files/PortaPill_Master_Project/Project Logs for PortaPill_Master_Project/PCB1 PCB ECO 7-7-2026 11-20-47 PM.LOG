@@ -1,0 +1,59 @@
+Added Component: Designator=DRV1(DRV8833)
+Added Component: Designator=DRV2(DRV8833)
+Added Component: Designator=DRV3(DRV8833)
+Added Component: Designator=DRV4(DRV8833)
+Added Component: Designator=DRV5(DRV8833)
+Add component: Footprint Not Found RPI-PICO-MOD
+Added Pin To Net: NetName=NetDRV1_IN4 Pin=DRV1-1
+Added Pin To Net: NetName=NetDRV1_IN3 Pin=DRV1-2
+Added Pin To Net: NetName=GND Pin=DRV1-3
+Added Pin To Net: NetName=+5 Pin=DRV1-4
+Added Pin To Net: NetName=NetDRV1_IN2 Pin=DRV1-5
+Added Pin To Net: NetName=NetDRV1_IN1 Pin=DRV1-6
+Added Pin To Net: NetName=NetDRV1_OUT4 Pin=DRV1-8
+Added Pin To Net: NetName=NetDRV1_OUT3 Pin=DRV1-9
+Added Pin To Net: NetName=NetDRV1_OUT2 Pin=DRV1-10
+Added Pin To Net: NetName=NetDRV1_OUT1 Pin=DRV1-11
+Added Pin To Net: NetName=NetDRV1_EEP Pin=DRV1-12
+Added Pin To Net: NetName=NetDRV2_IN4 Pin=DRV2-1
+Added Pin To Net: NetName=NetDRV2_IN3 Pin=DRV2-2
+Added Pin To Net: NetName=GND Pin=DRV2-3
+Added Pin To Net: NetName=+5 Pin=DRV2-4
+Added Pin To Net: NetName=NetDRV2_IN2 Pin=DRV2-5
+Added Pin To Net: NetName=NetDRV2_IN1 Pin=DRV2-6
+Added Pin To Net: NetName=NetDRV2_OUT4 Pin=DRV2-8
+Added Pin To Net: NetName=NetDRV2_OUT3 Pin=DRV2-9
+Added Pin To Net: NetName=NetDRV2_OUT2 Pin=DRV2-10
+Added Pin To Net: NetName=NetDRV2_OUT1 Pin=DRV2-11
+Added Pin To Net: NetName=NetDRV2_EEP Pin=DRV2-12
+Added Pin To Net: NetName=NetDRV3_IN4 Pin=DRV3-1
+Added Pin To Net: NetName=NetDRV3_IN3 Pin=DRV3-2
+Added Pin To Net: NetName=GND Pin=DRV3-3
+Added Pin To Net: NetName=+5 Pin=DRV3-4
+Added Pin To Net: NetName=NetDRV3_IN2 Pin=DRV3-5
+Added Pin To Net: NetName=NetDRV3_IN1 Pin=DRV3-6
+Added Pin To Net: NetName=NetDRV3_OUT4 Pin=DRV3-8
+Added Pin To Net: NetName=NetDRV3_OUT3 Pin=DRV3-9
+Added Pin To Net: NetName=NetDRV3_OUT2 Pin=DRV3-10
+Added Pin To Net: NetName=NetDRV3_OUT1 Pin=DRV3-11
+Added Pin To Net: NetName=NetDRV3_EEP Pin=DRV3-12
+Added Pin To Net: NetName=GND Pin=DRV4-3
+Added Pin To Net: NetName=+5 Pin=DRV4-4
+Added Pin To Net: NetName=NetDRV4_OUT4 Pin=DRV4-8
+Added Pin To Net: NetName=NetDRV4_OUT3 Pin=DRV4-9
+Added Pin To Net: NetName=NetDRV4_OUT2 Pin=DRV4-10
+Added Pin To Net: NetName=NetDRV4_OUT1 Pin=DRV4-11
+Added Pin To Net: NetName=NetDRV4_EEP Pin=DRV4-12
+Added Pin To Net: NetName=GND Pin=DRV5-3
+Added Pin To Net: NetName=+5 Pin=DRV5-4
+Added Pin To Net: NetName=NetDRV5_OUT4 Pin=DRV5-8
+Added Pin To Net: NetName=NetDRV5_OUT3 Pin=DRV5-9
+Added Pin To Net: NetName=NetDRV5_OUT2 Pin=DRV5-10
+Added Pin To Net: NetName=NetDRV5_OUT1 Pin=DRV5-11
+Added Pin To Net: NetName=NetDRV5_EEP Pin=DRV5-12
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component DRV1 DRV8833
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component DRV2 DRV8833
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component DRV3 DRV8833
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component DRV4 DRV8833
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component DRV5 DRV8833
+Add Class Member: Failed to add class member : Component RPI Pico2 RPI-PICO-MOD_SM

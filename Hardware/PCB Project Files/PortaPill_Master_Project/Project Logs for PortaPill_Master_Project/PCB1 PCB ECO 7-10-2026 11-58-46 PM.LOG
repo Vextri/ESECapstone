@@ -1,0 +1,16 @@
+Added Component: Designator=BTN(CONN_B5B-XH-A_JST)
+Add component (AddParameter): Name = "Copyright"; Value = "Copyright (C) 2026 Ultra Librarian. All rights reserved."; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Manufacturer_Name"; Value = "JST"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Manufacturer_Part_Number"; Value = "B5B-XH-A"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "RefDes"; Value = "RefDes"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Type"; Value = "Type"; VariantName = "[No Variations]"
+Add component: Footprint Not Found RPI-PICO-MOD
+Added Pin To Net: NetName=NetBTN_1 Pin=BTN-1
+Added Pin To Net: NetName=NetBTN_2 Pin=BTN-2
+Added Pin To Net: NetName=NetBTN_3 Pin=BTN-3
+Added Pin To Net: NetName=NetBTN_4 Pin=BTN-4
+Added Pin To Net: NetName=NetBTN_5 Pin=BTN-5
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component BTN BTN Switch
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component ESPHR 2x20 header
+Add Class Member: Failed to add class member : Component RPI Pico2 RPI-PICO-MOD_SM
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component STP3 B5B-XH-A

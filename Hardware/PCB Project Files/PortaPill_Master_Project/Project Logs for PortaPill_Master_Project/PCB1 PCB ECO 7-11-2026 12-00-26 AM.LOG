@@ -1,0 +1,66 @@
+Added Component: Designator=PIM1(SULLINS_PPPC042LFBN-RC)
+Add component (AddParameter): Name = "Check_prices"; Value = "https://www.snapeda.com/parts/PPPC042LFBNRC/Sullins/view-part/?ref=eda"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "MF"; Value = "Sullins Connector Solutions"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "MP"; Value = "PPPC042LFBNRC"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Package"; Value = "None"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "SnapEDA_Link"; Value = "https://www.snapeda.com/parts/PPPC042LFBNRC/Sullins/view-part/?ref=snap"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Value"; Value = ""; VariantName = "[No Variations]"
+Added Component: Designator=PIM2(SULLINS_PPPC042LFBN-RC)
+Add component (AddParameter): Name = "Check_prices"; Value = "https://www.snapeda.com/parts/PPPC042LFBNRC/Sullins/view-part/?ref=eda"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "MF"; Value = "Sullins Connector Solutions"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "MP"; Value = "PPPC042LFBNRC"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Package"; Value = "None"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "SnapEDA_Link"; Value = "https://www.snapeda.com/parts/PPPC042LFBNRC/Sullins/view-part/?ref=snap"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Value"; Value = ""; VariantName = "[No Variations]"
+Added Component: Designator=PIM3(SULLINS_PPPC042LFBN-RC)
+Add component (AddParameter): Name = "Check_prices"; Value = "https://www.snapeda.com/parts/PPPC042LFBNRC/Sullins/view-part/?ref=eda"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "MF"; Value = "Sullins Connector Solutions"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "MP"; Value = "PPPC042LFBNRC"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Package"; Value = "None"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "SnapEDA_Link"; Value = "https://www.snapeda.com/parts/PPPC042LFBNRC/Sullins/view-part/?ref=snap"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Value"; Value = ""; VariantName = "[No Variations]"
+Added Component: Designator=PIM4(SULLINS_PPPC042LFBN-RC)
+Add component (AddParameter): Name = "Check_prices"; Value = "https://www.snapeda.com/parts/PPPC042LFBNRC/Sullins/view-part/?ref=eda"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "MF"; Value = "Sullins Connector Solutions"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "MP"; Value = "PPPC042LFBNRC"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Package"; Value = "None"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "SnapEDA_Link"; Value = "https://www.snapeda.com/parts/PPPC042LFBNRC/Sullins/view-part/?ref=snap"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Value"; Value = ""; VariantName = "[No Variations]"
+Add component: Footprint Not Found RPI-PICO-MOD
+Added Pin To Net: NetName=NetPIM1_1 Pin=PIM1-1
+Added Pin To Net: NetName=NetPIM1_1 Pin=PIM1-2
+Added Pin To Net: NetName=NetPIM1_3 Pin=PIM1-3
+Added Pin To Net: NetName=NetPIM1_3 Pin=PIM1-4
+Added Pin To Net: NetName=+5 Pin=PIM1-5
+Added Pin To Net: NetName=+5 Pin=PIM1-6
+Added Pin To Net: NetName=GND Pin=PIM1-7
+Added Pin To Net: NetName=GND Pin=PIM1-8
+Added Pin To Net: NetName=NetPIM2_1 Pin=PIM2-1
+Added Pin To Net: NetName=NetPIM2_1 Pin=PIM2-2
+Added Pin To Net: NetName=NetPIM2_3 Pin=PIM2-3
+Added Pin To Net: NetName=NetPIM2_3 Pin=PIM2-4
+Added Pin To Net: NetName=+5 Pin=PIM2-5
+Added Pin To Net: NetName=+5 Pin=PIM2-6
+Added Pin To Net: NetName=GND Pin=PIM2-7
+Added Pin To Net: NetName=GND Pin=PIM2-8
+Added Pin To Net: NetName=NetPIM3_1 Pin=PIM3-1
+Added Pin To Net: NetName=NetPIM3_1 Pin=PIM3-2
+Added Pin To Net: NetName=NetPIM3_3 Pin=PIM3-3
+Added Pin To Net: NetName=NetPIM3_3 Pin=PIM3-4
+Added Pin To Net: NetName=+5 Pin=PIM3-5
+Added Pin To Net: NetName=+5 Pin=PIM3-6
+Added Pin To Net: NetName=GND Pin=PIM3-7
+Added Pin To Net: NetName=GND Pin=PIM3-8
+Added Pin To Net: NetName=NetPIM4_1 Pin=PIM4-1
+Added Pin To Net: NetName=NetPIM4_1 Pin=PIM4-2
+Added Pin To Net: NetName=NetPIM4_3 Pin=PIM4-3
+Added Pin To Net: NetName=NetPIM4_3 Pin=PIM4-4
+Added Pin To Net: NetName=+5 Pin=PIM4-5
+Added Pin To Net: NetName=+5 Pin=PIM4-6
+Added Pin To Net: NetName=GND Pin=PIM4-7
+Added Pin To Net: NetName=GND Pin=PIM4-8
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component PIM1 Piezo
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component PIM2 Piezo
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component PIM3 Piezo
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component PIM4 Piezo
+Add Class Member: Failed to add class member : Component RPI Pico2 RPI-PICO-MOD_SM

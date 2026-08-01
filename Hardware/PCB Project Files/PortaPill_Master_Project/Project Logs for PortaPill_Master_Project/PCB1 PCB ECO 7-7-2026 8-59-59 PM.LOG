@@ -1,0 +1,52 @@
+Add component: Footprint Not Found RPI-PICO-MOD
+Add Pin To Net: Unknown Pin: Pin RPI Pico2-42
+Added Pin To Net: NetName=NetDRV1_OUT2  Pin=STP1-4
+Added Net: Name=NetDRV1_OUT2 
+Added Pin To Net: NetName=NetDRV2_OUT2  Pin=STP2-4
+Added Net: Name=NetDRV2_OUT2 
+Added Pin To Net: NetName=NetDRV3_OUT2  Pin=STP3-4
+Added Net: Name=NetDRV3_OUT2 
+Added Pin To Net: NetName=NetDRV4_OUT2  Pin=STP4-4
+Added Net: Name=NetDRV4_OUT2 
+Added Pin To Net: NetName=NetDRV5_OUT2  Pin=STP5-4
+Added Net: Name=NetDRV5_OUT2 
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component 3V3Reg LM317AT/NOPB
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component AudioModule MAX98357A
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component C1 0.1uF
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component C2 100uF
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component C3 10uF
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component DRV1 DRV8833
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component DRV2 DRV8833
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component DRV3 DRV8833
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component DRV4 DRV8833
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component DRV5 DRV8833
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component ESPHL SSW-120-02-T-D-RA
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component ESPHR SSW-120-02-T-D-RA
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component LCD_Header PH1-14-UA
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component LED_Header B3B-XH-A
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component PIHL SSW-120-02-T-D-RA
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component PIHR SSW-120-02-T-D-RA
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component PIM1 PiezoModule
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component PIM2 PiezoModule
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component PIM3 PiezoModule
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component PIM4 PiezoModule
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component PIM5 PiezoModule
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component PWR Terminal 5V
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component R1 240ohm
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component R2 390ohm
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component RE1 B2B-XH-A
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component RE2 B2B-XH-A
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component RE3 B2B-XH-A
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component RE4 B2B-XH-A
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component RE5 B2B-XH-A
+Add Class Member: Failed to add class member : Component RPI Pico2 RPI-PICO-MOD_SM
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component STP1 B5B-XH-A
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component STP2 B5B-XH-A
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component STP3 B5B-XH-A
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component STP4 B5B-XH-A
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component STP5 B5B-XH-A
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component TR1 B3B-XH-A
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component TR2 B3B-XH-A
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component TR3 B3B-XH-A
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component TR4 B3B-XH-A
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component TR5 B3B-XH-A

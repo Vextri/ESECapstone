@@ -1,0 +1,55 @@
+Removed Pin From Net: NetName=NetBTN_5 Pin=ESPHL-29
+Removed Pin From Net: NetName=NetBTN_5 Pin=ESPHL-30
+Removed Pin From Net: NetName=NetBTN_3 Pin=ESPHL-33
+Removed Pin From Net: NetName=NetBTN_3 Pin=ESPHL-34
+Removed Pin From Net: NetName=NetBTN_2 Pin=ESPHL-37
+Removed Pin From Net: NetName=NetBTN_2 Pin=ESPHL-38
+Removed Pin From Net: NetName=NetBTN_1 Pin=ESPHL-39
+Removed Pin From Net: NetName=NetBTN_1 Pin=ESPHL-40
+Change Component Footprint: Designator=BTN Old Footprint=CONN_B5B-XH-A_JST New Footprint=CONN_B6B-XH-A_JST
+Change Component Comment : Designator=BTN Old Comment=BTN Switch New Comment=B6B-XH-A
+Change component parameters: Designator = "BTN" ("BTN"); Footprint = "CONN_B5B-XH-A_JST"; UniqueID = "\VBUAZAGD" ("\VBUAZAGD")
+Change component parameters (AddParameter): Name = "Copyright"; Value = "Copyright (C) 2026 Ultra Librarian. All rights reserved."; VariantName = "[No Variations]"
+Change component parameters (AddParameter): Name = "Manufacturer_Name"; Value = "JST"; VariantName = "[No Variations]"
+Change component parameters (AddParameter): Name = "Manufacturer_Part_Number"; Value = "B6B-XH-A"; VariantName = "[No Variations]"
+Change component parameters (AddParameter): Name = "RefDes"; Value = "RefDes"; VariantName = "[No Variations]"
+Change component parameters (AddParameter): Name = "Type"; Value = "Type"; VariantName = "[No Variations]"
+Added Component: Designator=R_Gain(RESA60-630X240)
+Add component (AddParameter): Name = "Case\Package"; Value = "Axial"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink1Description"; Value = "Manufacturer URL"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink1URL"; Value = "http://www.yageo.com/"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink2Description"; Value = "Datasheet"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink2URL"; Value = "http://www.yageo.com/documents/recent/Yageo%20LR_MFR_2013.pdf"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "DatasheetVersion"; Value = "Apr-13"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Length"; Value = "0.248 inch"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Max Operating Temperature"; Value = "155 degC"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Min Operating Temperature"; Value = "-55 degC"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Package Quantity"; Value = "200"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "PackageDescription"; Value = "2-Pin Axial Lead, Dia 2.4 mm, Body Length 6.3 mm"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "PackageReference"; Value = "MFR-25"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Packaging"; Value = "Bulk"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Power Rating"; Value = "250 mW"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Resistance"; Value = "10 kohm"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "RoHSCompliant"; Value = "true"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Tolerance"; Value = "1%"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Voltage Rating"; Value = "250 V"; VariantName = "[No Variations]"
+Add component: Footprint Not Found RPI-PICO-MOD
+Added Pin To Net: NetName=GND Pin=BTN-4
+Added Pin To Net: NetName=NetBTN_1 Pin=ESPHL-31
+Added Pin To Net: NetName=NetBTN_1 Pin=ESPHL-32
+Added Pin To Net: NetName=NetBTN_2 Pin=ESPHL-33
+Added Pin To Net: NetName=NetBTN_2 Pin=ESPHL-34
+Added Pin To Net: NetName=NetBTN_5 Pin=ESPHL-37
+Added Pin To Net: NetName=NetBTN_5 Pin=ESPHL-38
+Added Pin To Net: NetName=NetBTN_3 Pin=ESPHL-39
+Added Pin To Net: NetName=NetBTN_3 Pin=ESPHL-40
+Added Pin To Net: NetName=GND Pin=R_Gain-1
+Added Pin To Net: NetName=NetAudioModule_4 Pin=AudioModule-4
+Added Pin To Net: NetName=NetAudioModule_4 Pin=R_Gain-2
+Added Net: Name=NetAudioModule_4
+Added Pin To Net: NetName=NetBTN_6 Pin=BTN-6
+Added Pin To Net: NetName=NetBTN_6 Pin=ESPHL-29
+Added Pin To Net: NetName=NetBTN_6 Pin=ESPHL-30
+Added Net: Name=NetBTN_6
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component R_Gain 100
+Add Class Member: Failed to add class member : Component RPI Pico2 RPI-PICO-MOD_SM

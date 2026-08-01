@@ -1,0 +1,100 @@
+Removed Pin From Net: NetName=GND Pin=DRV5-3
+Removed Pin From Net: NetName=+5 Pin=DRV5-4
+Removed Pin From Net: NetName=+5 Pin=PIM5-3
+Removed Pin From Net: NetName=GND Pin=PIM5-4
+Removed Pin From Net: NetName=+5 Pin=RE5-1
+Removed Pin From Net: NetName=GND Pin=RE5-2
+Removed Pin From Net: NetName=+5 Pin=TR5-1
+Removed Pin From Net: NetName=GND Pin=TR5-3
+Removed Member From Class: ClassName=PortaPill_MainBoard Member=DRV5
+Removed Member From Class: ClassName=PortaPill_MainBoard Member=PIM5
+Removed Member From Class: ClassName=PortaPill_MainBoard Member=RE5
+Removed Member From Class: ClassName=PortaPill_MainBoard Member=STP5
+Removed Member From Class: ClassName=PortaPill_MainBoard Member=TR5
+Added Component: Designator=R1k_4(RESA60-630X240)
+Add component (AddParameter): Name = "Case\Package"; Value = "Axial"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink1Description"; Value = "Manufacturer URL"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink1URL"; Value = "http://www.yageo.com/"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink2Description"; Value = "Datasheet"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink2URL"; Value = "http://www.yageo.com/documents/recent/Yageo%20LR_MFR_2013.pdf"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "DatasheetVersion"; Value = "Apr-13"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Length"; Value = "0.248 inch"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Max Operating Temperature"; Value = "155 degC"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Min Operating Temperature"; Value = "-55 degC"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Package Quantity"; Value = "200"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "PackageDescription"; Value = "2-Pin Axial Lead, Dia 2.4 mm, Body Length 6.3 mm"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "PackageReference"; Value = "MFR-25"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Packaging"; Value = "Bulk"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Power Rating"; Value = "250 mW"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Resistance"; Value = "10 kohm"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "RoHSCompliant"; Value = "true"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Tolerance"; Value = "1%"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Voltage Rating"; Value = "250 V"; VariantName = "[No Variations]"
+Added Component: Designator=R2.2k_4(RESA60-630X240)
+Add component (AddParameter): Name = "Case\Package"; Value = "Axial"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink1Description"; Value = "Manufacturer URL"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink1URL"; Value = "http://www.yageo.com/"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink2Description"; Value = "Datasheet"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink2URL"; Value = "http://www.yageo.com/documents/recent/Yageo%20LR_MFR_2013.pdf"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "DatasheetVersion"; Value = "Apr-13"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Length"; Value = "0.248 inch"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Max Operating Temperature"; Value = "155 degC"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Min Operating Temperature"; Value = "-55 degC"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Package Quantity"; Value = "200"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "PackageDescription"; Value = "2-Pin Axial Lead, Dia 2.4 mm, Body Length 6.3 mm"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "PackageReference"; Value = "MFR-25"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Packaging"; Value = "Bulk"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Power Rating"; Value = "250 mW"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Resistance"; Value = "10 kohm"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "RoHSCompliant"; Value = "true"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Tolerance"; Value = "1%"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Voltage Rating"; Value = "250 V"; VariantName = "[No Variations]"
+Add component: Footprint Not Found RPI-PICO-MOD
+Added Component: Designator=TIR4(RESA60-630X240)
+Add component (AddParameter): Name = "Case\Package"; Value = "Axial"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink1Description"; Value = "Manufacturer URL"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink1URL"; Value = "http://www.yageo.com/"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink2Description"; Value = "Datasheet"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "ComponentLink2URL"; Value = "http://www.yageo.com/documents/recent/Yageo%20LR_MFR_2013.pdf"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "DatasheetVersion"; Value = "Apr-13"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Length"; Value = "0.248 inch"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Max Operating Temperature"; Value = "155 degC"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Min Operating Temperature"; Value = "-55 degC"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Package Quantity"; Value = "200"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "PackageDescription"; Value = "2-Pin Axial Lead, Dia 2.4 mm, Body Length 6.3 mm"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "PackageReference"; Value = "MFR-25"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Packaging"; Value = "Bulk"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Power Rating"; Value = "250 mW"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Resistance"; Value = "10 kohm"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "RoHSCompliant"; Value = "true"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Tolerance"; Value = "1%"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Voltage Rating"; Value = "250 V"; VariantName = "[No Variations]"
+Added Pin To Net: NetName=NetPIHL_23 Pin=R1k_4-1
+Added Pin To Net: NetName=NetPIHL_23 Pin=R2.2k_4-1
+Added Pin To Net: NetName=GND Pin=R2.2k_4-2
+Added Pin To Net: NetName=NetPIHL_19 Pin=TIR4-1
+Added Pin To Net: NetName=3V3 Pin=TIR4-2
+Added Pin To Net: NetName=NetPIHL_19 Pin=TR4-2
+Added Pin To Net: NetName=NetDRV4_IN1 Pin=PIHR-11
+Added Pin To Net: NetName=NetDRV4_IN1 Pin=PIHR-12
+Added Pin To Net: NetName=NetDRV4_IN1 Pin=DRV4-6
+Added Net: Name=NetDRV4_IN1
+Added Pin To Net: NetName=NetDRV4_IN2 Pin=PIHR-17
+Added Pin To Net: NetName=NetDRV4_IN2 Pin=PIHR-18
+Added Pin To Net: NetName=NetDRV4_IN2 Pin=DRV4-5
+Added Net: Name=NetDRV4_IN2
+Added Pin To Net: NetName=NetDRV4_IN3 Pin=PIHL-13
+Added Pin To Net: NetName=NetDRV4_IN3 Pin=PIHL-14
+Added Pin To Net: NetName=NetDRV4_IN3 Pin=DRV4-2
+Added Net: Name=NetDRV4_IN3
+Added Pin To Net: NetName=NetDRV4_IN4 Pin=PIHL-17
+Added Pin To Net: NetName=NetDRV4_IN4 Pin=PIHL-18
+Added Pin To Net: NetName=NetDRV4_IN4 Pin=DRV4-1
+Added Net: Name=NetDRV4_IN4
+Added Pin To Net: NetName=NetPIM4_1 Pin=PIM4-1
+Added Pin To Net: NetName=NetPIM4_1 Pin=R1k_4-2
+Added Net: Name=NetPIM4_1
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component R1k_4 1K ohms
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component R2.2k_4 2.2k ohms
+Add Class Member: Failed to add class member : Component RPI Pico2 RPI-PICO-MOD_SM
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component TIR4 10K ohms

@@ -1,0 +1,31 @@
+Add component: Footprint Not Found RPI-PICO-MOD
+Added Pin To Net: NetName=GND Pin=ESPHL-15
+Added Pin To Net: NetName=GND Pin=ESPHL-16
+Added Pin To Net: NetName=GND Pin=ESPHL-25
+Added Pin To Net: NetName=GND Pin=ESPHL-26
+Added Pin To Net: NetName=GND Pin=ESPHR-5
+Added Pin To Net: NetName=GND Pin=ESPHR-6
+Added Pin To Net: NetName=GND Pin=ESPHR-15
+Added Pin To Net: NetName=GND Pin=ESPHR-16
+Added Pin To Net: NetName=GND Pin=ESPHR-25
+Added Pin To Net: NetName=GND Pin=ESPHR-26
+Added Pin To Net: NetName=GND Pin=ESPHR-35
+Added Pin To Net: NetName=GND Pin=ESPHR-36
+Added Pin To Net: NetName=GND Pin=PIHL-15
+Added Pin To Net: NetName=GND Pin=PIHL-16
+Added Pin To Net: NetName=GND Pin=PIHL-25
+Added Pin To Net: NetName=GND Pin=PIHL-26
+Added Pin To Net: NetName=GND Pin=PIHL-35
+Added Pin To Net: NetName=GND Pin=PIHL-36
+Added Pin To Net: NetName=GND Pin=PIHR-5
+Added Pin To Net: NetName=GND Pin=PIHR-6
+Added Pin To Net: NetName=GND Pin=PIHR-15
+Added Pin To Net: NetName=GND Pin=PIHR-16
+Added Pin To Net: NetName=GND Pin=PIHR-25
+Added Pin To Net: NetName=GND Pin=PIHR-26
+Added Pin To Net: NetName=GND Pin=PIHR-35
+Added Pin To Net: NetName=GND Pin=PIHR-36
+Change Net Color : Old Net Color=RGB(233, 236, 0) New Net Color=Default
+Change Net Color : Old Net Color=RGB(191, 0, 0) New Net Color=Default
+Change Net Color : Old Net Color=RGB(101, 103, 100) New Net Color=Default
+Add Class Member: Failed to add class member : Component RPI Pico2 RPI-PICO-MOD_SM

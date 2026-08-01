@@ -1,0 +1,24 @@
+Change Component Designator: Old Designator=3V3Reg New Designator=1
+Change Component Designator: Old Designator=AudioModule New Designator=AudioModule1
+Change Component Designator: Old Designator=BTN New Designator=BTN1
+Change Component Designator: Old Designator=C1 New Designator=C3
+Change Component Designator: Old Designator=C3 New Designator=C1
+Change Component Designator: Old Designator=ESPHL New Designator=ESPHL1
+Change Component Designator: Old Designator=ESPHR New Designator=ESPHR1
+Change Component Designator: Old Designator=LCD_Header New Designator=LCD_Header1
+Change Component Designator: Old Designator=LED_Header New Designator=LED_Header1
+Change Component Designator: Old Designator=PIHL New Designator=PIHL1
+Change Component Designator: Old Designator=PIHR New Designator=PIHR1
+Change Component Designator: Old Designator=PWR Terminal New Designator=PWR Terminal1
+Change Component Designator: Old Designator=R1 New Designator=R9
+Change Component Designator: Old Designator=R1k_1 New Designator=R1
+Change Component Designator: Old Designator=R1k_2 New Designator=R3
+Change Component Designator: Old Designator=R1k_3 New Designator=R5
+Change Component Designator: Old Designator=R1k_4 New Designator=R7
+Change Component Designator: Old Designator=R2 New Designator=R10
+Change Component Designator: Old Designator=R2.2k_1 New Designator=R2
+Change Component Designator: Old Designator=R2.2k_2 New Designator=R4
+Change Component Designator: Old Designator=R2.2k_3 New Designator=R6
+Change Component Designator: Old Designator=R2.2k_4 New Designator=R8
+Change Component Designator: Old Designator=R_Gain New Designator=R_Gain1
+Change Component Designator: Old Designator=RPI Pico2 New Designator=RPI Pico1

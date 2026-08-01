@@ -1,0 +1,12 @@
+Added Component: Designator=PIM1(CONN_PPTC041LFBN-RC_SUL)
+Add component (AddParameter): Name = "Copyright"; Value = "Copyright (C) 2026 Ultra Librarian. All rights reserved."; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Manufacturer_Name"; Value = "Sullins"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Manufacturer_Part_Number"; Value = "PPTC041LFBN-RC"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "RefDes"; Value = "RefDes"; VariantName = "[No Variations]"
+Add component (AddParameter): Name = "Type"; Value = "Type"; VariantName = "[No Variations]"
+Add component: Footprint Not Found RPI-PICO-MOD
+Added Pin To Net: NetName=NetPIHR_13 Pin=PIM1-1
+Added Pin To Net: NetName=+5 Pin=PIM1-3
+Added Pin To Net: NetName=GND Pin=PIM1-4
+Added Member To Class: ClassName=PortaPill_MainBoard Member=Component PIM1 PiezoModule
+Add Class Member: Failed to add class member : Component RPI Pico2 RPI-PICO-MOD_SM
