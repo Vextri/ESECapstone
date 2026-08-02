@@ -1,0 +1,11 @@
+# Front Matter
+
+Title Page
+
+Abstract
+Medication non-adherence is a persistent and costly failure in healthcare delivery, driven by three compounding problems: physical accessibility barriers in standard pharmacy packaging, the cognitive burden of self-managed pill organisers, and the absence of delivery verification in existing automated dispensers, which assume a dispense succeeded rather than confirming it. PortaPill is a portable, three-compartment automated medication dispensing system developed to address this gap. It stores three medications of differing pill geometry, dispenses the correct dose at scheduled times without user intervention, and, unlike the commercial and proof-of-concept devices surveyed in this report, physically verifies every dispense through a sequential dual-sensor process (piezoelectric impact and infrared beam-break) before logging it as successful, with automatic retry and explicit failure reporting on persistent failure. A third verification stage, driven by a Hall-effect drawer sensor, confirms physical pickup by the user, extending the verification chain beyond delivery to retrieval. The system operates entirely offline: scheduling, dispensing, verification and on-device alerting require no internet connection, no cloud service and no subscription, with the ESP32-S3 hosting a locally served web dashboard as an optional configuration channel. The architecture partitions responsibility across two microcontrollers, a Raspberry Pi Pico 2 (RP2350) as the real-time dispensing authority and an ESP32-S3 as the user interface and connectivity layer, connected by an asynchronous serial link, so that a fault in the interface layer cannot interrupt scheduled medication delivery. [PLACEHOLDER: one to two sentences of measured results, to be added once Section 9 testing is complete, e.g. dispense success rate, verification accuracy, battery runtime against the R-19 target.] [PLACEHOLDER: one closing sentence stating what the prototype demonstrates about the feasibility of sensor-verified automated dispensing, consistent with the honest positioning in Section 14.5, a working prototype demonstrating technical feasibility, not a claim of a deployable medical device.]
+
+Table of Contents
+List of Figures
+List of Tables
+List of Abbreviations
