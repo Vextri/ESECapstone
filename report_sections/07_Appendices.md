@@ -100,9 +100,8 @@ The complete test plans, with all measured values recorded and sign-off blocks c
 2	Mechanical Enclosure Validation and Subsystem Test Plan	§8.3
 3	Raspberry Pi Pico 2 Firmware Validation and Subsystem Test Plan	§8.5
 4	ESP32-S3 Firmware Validation and Subsystem Test Plan	§8.5
-5	Functional Prototype Test Plan	§8.5
-6	System Integration and Validation Test Plan	§9.1, §9.2
-7	Week 12 Development Verification Record	§8.6
+5	Functional Prototype Test Plan	§8.5, §9.1, §9.2
+6	Week 12 Development Verification Record	§8.6
 
 [⚠ ACTION — SIGN-OFF] All test plans must be signed and dated before submission. An unsigned test record is formally not a record, and it undermines the verification argument these documents exist to support. This is a two-minute task.
 Appendix H — User Safety Notice

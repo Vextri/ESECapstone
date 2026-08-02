@@ -20,7 +20,7 @@ Content is done. Open items:
 - [ ] `[DATA]` Test IDs for R-15, R-32, R-36 in the traceability matrix (deferred until we reach the testing sections)
 - [ ] `[DIAGRAM]` Figure 2 — dispense state machine diagram
 - [ ] `[DECISION]` Fold your BOM data into Table 4.4, or keep it separate for Appendix D?
-- [ ] `[DATA]` Optional: verify whether the LCD draws 3.3V from the ESP32-S3's own onboard regulator or the LM317 sensor rail
+- [x] LCD power source confirmed — draws 5V, not 3.3V, so it does NOT share the LM317-regulated sensor rail. Not currently stated anywhere in the report body; worth a one-line addition to §5.1 power architecture discussion if you want it explicit (keeps the sensor rail's noise isolation claim more complete), but not blocking anything
 
 ## Section 5 — Functional Units (the big one — heaviest diagram/data section)
 
@@ -65,15 +65,19 @@ Content is done. Open items:
 - [x] Pickup lifecycle state ownership (Pending/Taken/Failed/Timeout) — fully traced and documented: RP2350 supplies only the raw dispense success/fail bit; ESP32-S3 decides all four lifecycle states unilaterally via its own sensor and clock
 - [x] Per-station reminder "independence" clarified — pickup state is tracked per-slot but cleared collectively on any drawer-open event (single shared drawer, single active Hall sensor); documented as a deliberate design choice, not a bug
 
+**Numbering fix**
+- [x] Table 5.5 duplicate fixed — whole tail of the sequence was off (5.6-5.9), all renumbered to match document order, all 4 cross-references updated
+
 **Integration (INT-1)**
 - [ ] `[PHOTO]` Perfboard control board (top, bottom, installed)
 - [ ] `[DIAGRAM]` Altium schematic (full capture, legible even split across pages)
 - [ ] `[PHOTO]` PCB progression: layout view, 3D render, bare board, populated board
 
 ## Sections 4/7 — Methodology & Implementation
-- [ ] `[WRITE]` Complete the Week 13 schedule row (final assembly, reliability trial, final demo)
-- [ ] `[DATA]` Confirm drop site 3 is resolved on the PCB build + photo of the cleared path
-- [ ] `[DATA]` Verification status for the background-sync fix (how many cycles run, over what period, no recurrence)
+- [x] Table 4.3 fixed — five signed test plans + supplementary Week 12 record (not "seven"), duplicate row merged, all files now consistent
+- [~] `[WRITE]`/`[PHOTO]` Week 13 schedule row — milestone text updated (final assembly done, reliability trial/demo in progress); still needs photos and final reliability-trial results once complete
+- [x] Drop site 3 confirmed resolved on PCB build — still needs `[PHOTO]` of the cleared path
+- [x] Background-sync fix verified — 15 dispense cycles, no recurrence
 - [ ] `[DIAGRAM]` V-model test strategy diagram
 - [ ] `[PHOTO]` Mechanical fabrication evidence
 - [ ] `[PHOTO]` Perfboard build (top/bottom/installed/button-LED mini board)
@@ -85,46 +89,53 @@ Content is done. Open items:
 - [ ] `[WRITE]` Required deliverable noted in the source (check what this is when we get here)
 
 ## Sections 8-9 — Results and Validation (biggest data-dependent section)
-- [ ] `[WRITE]` Whole section, once testing is complete — most of it is placeholder until then
+- [x] Section 9 (9.1–9.4) fully reviewed and written — Table 9.1 all 36 requirements verdicted, Table 9.2 computed, Table 9.3 partially filled (FU-2/INT-1 complete; FU-1/FU-3/FU-4/FU-5 need actual test-count totals from the signed Board/Mechanical/ESP32-S3 test plan PDFs — not derivable from the markdown files), §9.4 uncertainty/limitations analysis complete
+- [ ] `[DATA]` Table 9.3 remaining totals — Board Test Plan (FU-1, and Phase 5 alone for FU-3), Mechanical Test Plan (FU-4), ESP32-S3 per-category counts (FU-5); pull from Appendix G documents when available
+- [ ] `[WRITE]` Section 8: much of it now written; remaining placeholders are genuinely data-dependent (see items below)
 - [ ] `[CHART]` Power rail margin (bar chart, measured vs. spec band)
 - [ ] `[CHART]` Current draw by operating condition
 - [ ] `[DATA]`/`[PHOTO]` Oscilloscope: 5V rail on wall power vs. battery; LM317 output both conditions
 - [ ] `[DATA]` Timing measurements (flagged placeholder, specifics TBD)
 - [ ] `[SIGN-OFF]` Complete Phase 4 flash persistence tests (blocking — supports R-08A/R-08B) + resolve the blank K-03 result
-- [ ] `[DATA]` Populate results from the ESP32-S3 Firmware Test Plan record
-- [ ] `[DATA]`/`[SIGN-OFF]` Seven outstanding functional prototype tests (flagged as quick/blocking)
+- [x] ESP32-S3 Firmware Test Plan — passed, Table 8.9 updated (all categories Pass)
+- [x] Seven outstanding functional prototype tests — marked passed per confirmation through direct operation of the final unit (Table 8.10); still needs the signed Functional Prototype Test Plan in Appendix G to reflect the same status
 - [ ] `[DATA]` Status check: button replacement, wiring congestion, pinched power lead (safety issue if unresolved — flag in Section 10.1 if so)
-- [ ] `[WRITE]` Convert "implemented" items to "verified" where confirmed in use
+- [x] Convert "implemented" items to "verified" — escalating reminders, low-pill alerts, per-motor speed control, slot 2 rewire/direction all confirmed and updated in Table 8.11
 - [ ] `[CHART]` Dispense success rate by slot and fill level (with R-01 target line)
 - [ ] `[CHART]` Attempts required per dispense (histogram: 1/2/3 attempts)
 - [ ] `[CHART]` IR confirmation delay distribution (histogram, 300ms window marked)
 - [ ] `[DATA]`/`[PHOTO]` Oscilloscope: piezo impact + IR beam-break (Results-section versions)
-- [ ] `[WRITE]` Investigate and report the highest-value diagnostic item (flagged, check specifics when we arrive)
-- [ ] `[WRITE]` Part B validation summary (how many tests run/passed)
+- [x] Current-draw anomaly (§8.9) — resolved, combination of 3.3V distribution bottleneck + inconsistent motor de-energisation, fixed via wiring + firmware changes; stable 400mA idle on Unit 2 PCB build. `[DATA]` optional: a before/after current measurement would strengthen this for PA3
+- [x] Part B validation summary — written in §9.2 from Table 9.1/9.2 compliance data (10/15 Must Met, 5 Partially Met; 9/11 Should Met; full breakdown in Table 9.2)
 - [ ] `[CHART]` Idle current breakdown by component
 - [ ] `[CHART]` Current draw vs. cumulative dispense events
 - [ ] `[WRITE]` Pill geometry characterisation (optional but narrows a stated uncertainty)
-- [ ] `[DATA]` Actual cycle counts per slot + honest confidence-interval statement
-- [ ] `[WRITE]` State which unit/firmware revision produced each dataset (perfboard vs. PCB results aren't interchangeable)
-- [ ] `[DATA]` Drop site 3 status (duplicate of the item above, confirm once)
-- [~] `[DATA]` Battery runtime measurement on the PCB build (R-19) — multi-day test in progress, see Section 5 Power notes above
+- [~] `[DATA]` Reliability trial — 50 cycles total, ~44-45 succeeded (~3 needed retry, ~2 full jam), zero double-feeds confirmed, recollection-based approximate figures now in Table 8.2. Still open: per-slot/fill-level breakdown not tracked, so Tables 8.3/8.4 remain empty
+- [x] State which unit/firmware revision produced each dataset — reliability trial ran across both units combined (noted with caveat in §9.4.3); battery runtime and current-draw resolution specifically on Unit 2
+- [x] Drop site 3 status — confirmed resolved on PCB build (Section 7.4)
+- [x] Battery runtime measurement (R-19) — 6600mAh/24.42Wh pack (2x3300mAh parallel), 400mA idle measured on the 5V rail on Unit 2 PCB build. Corrected calc (energy-based per §5.1.4's own formula, not simple mAh/mA ratio): P=5V×0.4A=2.0W, t=E/P=12.21h calculated, ~10.4-11.0h derated, ~43-46% of the 24h requirement, verdict Not Met
 - [ ] `[CHART]` Requirements compliance by priority (stacked bar, Met/Partially Met/Not Met) — good for the presentation too
 
 ## Sections 10-14 — Impact, Ethics, Conclusion
-- [ ] `[WRITE]` Optional life-cycle discussion (materials, manufacture, use-phase, service life, end-of-life)
-- [ ] `[WRITE]` Verify and extend the flagged subsection (check specifics when we arrive)
-- [ ] `[WRITE]` Health Canada device classification statement (framed as "would likely require...", not asserted as fact)
-- [ ] `[WRITE]` Complete bracketed cells: prior skill levels and how they were actually acquired, be specific about sources
-- [ ] `[WRITE]` Engineering Analysis 2: GPIO protection divider bounds
-- [ ] `[WRITE]` Engineering Analysis 3: LM317 thermal analysis (ties to the Section 5 one above)
-- [ ] `[WRITE]` Engineering Analysis 4: battery runtime calculation
-- [ ] `[WRITE]` Engineering Analysis 5: stepper angular displacement per dispense — reframed: dispense is sensor-terminated, not step-counted, so there's no fixed figure to derive; if still wanted, log a few real `stepper_get_step_count()` values and report a range, not a single derived spec
-- [ ] `[WRITE]` Risk register: close out R-01, R-02, R-03, R-05, R-06, R-08, R-09, R-10, R-13 with actual status, and score newly-identified risks R-14/R-15
-- [ ] `[WRITE]` Goals achieved section (G1-G8, one to two sentences each, evidence-based, honest about partial achievement) — write after Section 9 is done
-- [ ] `[WRITE]` Expand supporting evidence for flagged claims
-- [ ] `[WRITE]` Lessons learned (must be written by you and Blaise directly — not something I should draft)
-- [ ] `[WRITE]` Elevator pitch paragraph (also needed for the final presentation)
-- [ ] `[WRITE]` Closing conclusion paragraph (write last, 3-4 sentences, no overclaiming)
+- [x] Section 10 (10.1-10.4) reviewed — duplicate heading fixed, H4 cross-ref and content corrected (anomaly was confirmed active on Unit 1, resolved on Unit 2), life-cycle discussion skipped per decision (optional, existing §10.4 coverage is sufficient)
+- [ ] `[DATA]`/`[SAFETY]` H5 — pinched power supply lead status unconfirmed. Physically inspect where the power cable passes through the Unit 2 enclosure for pinch points/sharp bends before the demonstration; update H5 (§10.1) and the related note in §8.5 once checked
+- [x] §10.4 RoHS claim confirmed accurate, kept as-is
+- [x] Section 11 (11.1-11.5) reviewed — duplicate heading fixed, stale §8.8 "unresolved anomaly" reference replaced with the still-accurate R-19 battery shortfall example, Table 11.1 standards verified (RoHS row removed, CSA/WCAG deliberately not added since neither was actually consulted)
+- [x] Section 14 (14.1-14.7) reviewed — duplicate heading fixed, Must/Should/Could counts + full G1-G8 goals assessment written from Table 9.1/9.2, broken 25-40 numbering fixed in Strengths/Weaknesses (same copy-paste bug family), stale "unresolved anomaly" weakness replaced with real battery-runtime shortfall, §14.5 item 1.2 rewritten (thermal-measurement follow-up, was stale anomaly reference), two more broken cross-refs fixed (§8.7→§8.8, §9.5 #8→#7 caused by my own earlier renumbering)
+- [x] Health Canada device classification statement — written, Class I or II with justification, framed as "would likely require...subject to determination by Health Canada"
+- [x] Section 12 (12.1-12.3) reviewed and completed — duplicate heading fixed, two wrong cross-refs fixed in Table 12.1 (§5.5.4→§5.5.5 mutex, §8.7→§8.8 battery), all bracketed prior-skill-level/source cells filled in Table 12.2, Engineering Analyses 2/3/4 written
+- [x] Engineering Analysis 2: GPIO protection divider bounds — written (3.44V worst-case clamp, 2.15V V_IH margin)
+- [x] Engineering Analysis 3: LM317 thermal analysis — written using measured 31mA no-load 3.3V rail current (P-04); ~2.6°C rise, T_J~27.6°C, well below 125°C max, no heatsink required
+- [x] Engineering Analysis 4: battery runtime calculation — written. IMPORTANT: this triggered a correction to §8.8/§9.1/§9.5 — the original calc used simple mAh/mA ratio (16.5h) but the report's own §5.1.4 methodology requires energy-based calc since 400mA was measured on the 5V rail post-boost-conversion, not at the battery. Corrected: E=24.42Wh, P=5V×0.4A=2.0W, t=12.21h calculated, ~10.4-11.0h derated (~43-46% of 24h target, still Not Met)
+- [x] Engineering Analysis 5: stepper angular displacement — already correctly reframed as N/A (sensor-terminated design), no action needed
+- [x] Section 13 reviewed and mostly closed out — duplicate heading fixed, R-14/R-15 ID collision fixed (renamed R-37/R-38, they clashed with existing requirement IDs), risk closures R-01/02/03/05/06/08/09/10/13 filled in with real Section 8/9 evidence
+- [x] R-37/R-38 S/O/D scores confirmed as proposed (S7/O3/D5 RPN105; S6/O8/D4 RPN192)
+- [ ] `[DECISION]` Optional: state the RPN Low/Medium boundary explicitly in §13.1 (only "≥80 = High" is currently defined; table usage implies Low is roughly ≤30 but this isn't stated in the methodology text)
+- [x] Goals achieved section (G1-G8) — written, evidence-based against Table 9.1, honest about partial achievement (G1/G2/G5/G8 Partially Achieved, G3/G4/G6/G7 Achieved)
+- [ ] `[DATA]` §14.1: actual firmware line count (bracketed placeholder, e.g. `git ls-files '*.c' '*.h' | xargs wc -l`)
+- [ ] `[WRITE]` Lessons learned / §14.4 Learning Experience (must be written by you and Alan directly — the section's own instruction says so, not something Claude should draft)
+- [ ] `[DATA]`/`[WRITE]` §14.6 Commercialisation — blocked on Appendix D's BOM cost data (still empty); write once real prototype cost is entered
+- [ ] `[WRITE]` §14.7 Closing conclusion paragraph (write last, 3-4 sentences, no overclaiming — deliberately left for the very end)
 
 ## Appendices
 - [ ] `[WRITE]` Clean up reference list (see earlier notes — some entries incomplete)
