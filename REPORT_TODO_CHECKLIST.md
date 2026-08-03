@@ -17,7 +17,12 @@ Content is done. Only open item:
 
 ## Sections 3-4 — Requirements & System Design
 Content is done. Open items:
-- [ ] `[DATA]` Test IDs for R-15, R-32, R-36 in the traceability matrix (deferred until we reach the testing sections)
+- [x] Traceability matrix (Table 3.3) overhauled: Mechanical Enclosure and Power Board test IDs renamed to `REQ-XX-##` and mapped in; ESP32-S3 Firmware Test Plan (v2) fully integrated across 14 requirements; R-32 (previously had no test ID at all) resolved; five new rows added (R-20, R-25, R-33, R-34, R-35) that previously had no assigned test. Everything under the new IDs is marked pending, not Met, since none of it is executed yet.
+- [x] Table 6.1 updated: Power Board and Mechanical rows now say "Consolidated Requirement-Based Tests"; ESP32-S3 row now lists its real 11 phases instead of the old vague 7-phase summary
+- [x] AP password fix: generic phrasing only, no literal value in the report, gitignored credential file confirmed; the stale "9 characters" claim (password changed to 13 chars) is fixed
+- [x] UART bridge timeout: no report edit needed, fixed in firmware instead (now genuinely 5s, matching what the report already said)
+- [x] Pico 2 Firmware Test Plan (v2) integrated — fixed three fake test IDs that never matched any real document (R-01's F-14 to F-16, R-03's T-01, R-18's INT-06), fixed two mis-filed citations (F-04/F-05 moved from R-03 to R-18), added missing Pico-side evidence to R-04 and R-08A/B which previously only cited ESP-side tests. Table 6.1's Pico row was already accurate, no change needed there.
+- [ ] Still need: Board Test Plan revision (the only one of five not yet sent) — once it arrives, same integration treatment
 - [ ] `[DIAGRAM]` Figure 2 — dispense state machine diagram
 - [ ] `[DECISION]` Fold your BOM data into Table 4.4, or keep it separate for Appendix D?
 - [x] LCD power source confirmed — draws 5V, not 3.3V, so it does NOT share the LM317-regulated sensor rail. Not currently stated anywhere in the report body; worth a one-line addition to §5.1 power architecture discussion if you want it explicit (keeps the sensor rail's noise isolation claim more complete), but not blocking anything
@@ -73,22 +78,32 @@ Content is done. Open items:
 - [ ] `[DIAGRAM]` Altium schematic (full capture, legible even split across pages)
 - [ ] `[PHOTO]` PCB progression: layout view, 3D render, bare board, populated board
 
-## Sections 4/7 — Methodology & Implementation
-- [x] Table 4.3 fixed — five signed test plans + supplementary Week 12 record (not "seven"), duplicate row merged, all files now consistent
-- [~] `[WRITE]`/`[PHOTO]` Week 13 schedule row — milestone text updated (final assembly done, reliability trial/demo in progress); still needs photos and final reliability-trial results once complete
-- [x] Drop site 3 confirmed resolved on PCB build — still needs `[PHOTO]` of the cleared path
-- [x] Background-sync fix verified — 15 dispense cycles, no recurrence
-- [ ] `[DIAGRAM]` V-model test strategy diagram
-- [ ] `[PHOTO]` Mechanical fabrication evidence
-- [ ] `[PHOTO]` Perfboard build (top/bottom/installed/button-LED mini board)
-- [ ] `[PHOTO]` PCB build evidence (same set)
-- [ ] `[DATA]`/`[PHOTO]` Optional: oscilloscope capture of 3.3V rail during audio activity, before/after your fix
+## Section 6 — Engineering Methodology and Test Strategy
+Only two things left here, everything else in 6.1-6.4 is fully written:
+- [ ] `[DIAGRAM]` V-model test strategy diagram — not drawn yet, still just a text placeholder
+- [ ] `[SIGN-OFF]` All five test plans need to be signed and dated once real testing is complete (blocked on the test-recording work below)
+
+## Section 7 — Implementation
+Content and prose are done (including the "three defects" to "six defects" count fix). Everything left is photos, one video, and finishing the reliability trial — no more writing needed.
+
+- [ ] `[PHOTO]` Mechanical fabrication: parts laid out, dovetail joint, dispensing mechanism close-up, drawer, finished enclosure from each side
+- [~] `[PHOTO]` Perfboard build: top, bottom, installed in enclosure, button/LED mini-board — user has "a picture," confirm whether it covers all four angles
+- [~] `[PHOTO]` PCB build required set: Altium schematic (have it), PCB layout top/bottom copper, 3D render (have it), bare board photo, populated board photo, populated-board-installed photo — confirm which of these still need to be taken
+- [ ] `[PHOTO]` The cleared drop-path (proof drop site 3 is actually fixed)
+- [ ] `[PHOTO]` Log screenshot for the command-corruption bug (7.5.2) — real capture already exists, just needs the file
+- [ ] `[PHOTO]` GitHub repository screenshot showing commit history
+- [ ] `[PHOTO]` Final assembly set: both units side by side, Unit 2 hero shot (powered on, LCD live), enclosure open, front panel detail, drawer open with pills present
+- [ ] `[VIDEO]` Demonstration video — not filmed/edited yet, this is real remaining work, not just a file handoff. Suggested structure already written into Section 7.7.
+- [~] `[DATA]`/`[PHOTO]` Week 13 wrap-up — reliability trial and final demo in progress; needs real results once done
+- [ ] `[DATA]`/`[PHOTO]` Optional: oscilloscope capture of 3.3V rail during audio activity, before/after the fix
+- [ ] `[WRITE]`/`[DATA]` Real functional test cases: extensive testing was done across multiple stations but not formally recorded. Plan: record real results against the test IDs already named throughout the report (F-series, B-series, M-series, U-01, etc.) rather than inventing a new structure. Needs its own consolidated punch-list next session.
 - [ ] `[DATA]` Captured serial log evidence of the merged-command bug
 - [ ] `[PHOTO]` GitHub repository screenshot (commit history)
 - [ ] `[PHOTO]` Final assembly photos
 - [ ] `[WRITE]` Required deliverable noted in the source (check what this is when we get here)
 
 ## Sections 8-9 — Results and Validation (biggest data-dependent section)
+- [x] Formatting cleanup pass: removed all 126 em dashes and 10 leftover rubric/template meta-notes that were never cleaned from this file (unlike Sections 1-4, which were done earlier). All real data, analysis, and genuine pending/placeholder markers preserved exactly; only punctuation and drafting-instruction scaffolding removed. Also fixed a stale "Hall effect sensor role" limitation entry (item 12, Section 9.5) that pointed to an open question already resolved back in Section 5.5.2.
 - [x] Section 9 (9.1–9.4) fully reviewed and written — Table 9.1 all 36 requirements verdicted, Table 9.2 computed, Table 9.3 partially filled (FU-2/INT-1 complete; FU-1/FU-3/FU-4/FU-5 need actual test-count totals from the signed Board/Mechanical/ESP32-S3 test plan PDFs — not derivable from the markdown files), §9.4 uncertainty/limitations analysis complete
 - [ ] `[DATA]` Table 9.3 remaining totals — Board Test Plan (FU-1, and Phase 5 alone for FU-3), Mechanical Test Plan (FU-4), ESP32-S3 per-category counts (FU-5); pull from Appendix G documents when available
 - [ ] `[WRITE]` Section 8: much of it now written; remaining placeholders are genuinely data-dependent (see items below)
@@ -105,7 +120,7 @@ Content is done. Open items:
 - [ ] `[CHART]` Attempts required per dispense (histogram: 1/2/3 attempts)
 - [ ] `[CHART]` IR confirmation delay distribution (histogram, 300ms window marked)
 - [ ] `[DATA]`/`[PHOTO]` Oscilloscope: piezo impact + IR beam-break (Results-section versions)
-- [x] Current-draw anomaly (§8.9) — resolved, combination of 3.3V distribution bottleneck + inconsistent motor de-energisation, fixed via wiring + firmware changes; stable 400mA idle on Unit 2 PCB build. `[DATA]` optional: a before/after current measurement would strengthen this for PA3
+- [x] Current-draw anomaly (Section 8.9) — root cause resolved, combination of 3.3V distribution bottleneck + inconsistent motor de-energisation, fixed via wiring + firmware changes. The old "stable 400mA idle" figure has been withdrawn (it was unconfirmed pre-fix Unit 1 data, not a real Unit 2 measurement) — re-verification by actual measurement is still outstanding, folded into REQ-19-01 below
 - [x] Part B validation summary — written in §9.2 from Table 9.1/9.2 compliance data (10/15 Must Met, 5 Partially Met; 9/11 Should Met; full breakdown in Table 9.2)
 - [ ] `[CHART]` Idle current breakdown by component
 - [ ] `[CHART]` Current draw vs. cumulative dispense events
@@ -113,7 +128,7 @@ Content is done. Open items:
 - [~] `[DATA]` Reliability trial — 50 cycles total, ~44-45 succeeded (~3 needed retry, ~2 full jam), zero double-feeds confirmed, recollection-based approximate figures now in Table 8.2. Still open: per-slot/fill-level breakdown not tracked, so Tables 8.3/8.4 remain empty
 - [x] State which unit/firmware revision produced each dataset — reliability trial ran across both units combined (noted with caveat in §9.4.3); battery runtime and current-draw resolution specifically on Unit 2
 - [x] Drop site 3 status — confirmed resolved on PCB build (Section 7.4)
-- [x] Battery runtime measurement (R-19) — 6600mAh/24.42Wh pack (2x3300mAh parallel), 400mA idle measured on the 5V rail on Unit 2 PCB build. Corrected calc (energy-based per §5.1.4's own formula, not simple mAh/mA ratio): P=5V×0.4A=2.0W, t=E/P=12.21h calculated, ~10.4-11.0h derated, ~43-46% of the 24h requirement, verdict Not Met
+- [ ] `[DATA]` Battery runtime measurement (R-19) — pack capacity known (6600mAh/24.42Wh, 2x3300mAh parallel), but the runtime calculation itself is blocked: the old 400mA idle figure was withdrawn as unconfirmed pre-fix data, so REQ-19-01 (Table 8.1) must be physically re-executed on Unit 2 (multimeter in series at UPS output, idle/one-motor/full-system) before runtime can be calculated. Currently Pending, not Not Met
 - [ ] `[CHART]` Requirements compliance by priority (stacked bar, Met/Partially Met/Not Met) — good for the presentation too
 
 ## Sections 10-14 — Impact, Ethics, Conclusion

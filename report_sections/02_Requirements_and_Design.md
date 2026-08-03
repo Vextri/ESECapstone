@@ -108,29 +108,34 @@ Time-Bound	Button navigation, LED and audio alerting demonstrated in the ESP32-S
 3.4 Requirements Traceability Matrix
 Table 3.3: Requirements traceability
 Req ID	Design section	Verification test(s)	Validation evidence	Status
-R-01	Section 5.4 Mechanical	MEC-03, MEC-04, F-14 to F-16	Section 9.2	[Met / Partially Met / Not Met]
-R-02	Section 5.2, 5.4	F-06 (multi-pill dose)	Section 9.2	[ ]
-R-03	Section 5.3 Sensing	F-03, F-04, F-05, T-01	Section 9.2	[ ]
-R-04	Section 5.2 Control	F-18 (scheduled dispense)	Section 9.2	[ ]
-R-05	Section 5.1 Power	P-01, M-06, PWR-05	Section 9.2	[ ]
-R-06	Section 5.1 Power	U-01, U-02, F-23	Section 9.2	[ ]
-R-07	Section 5.1 Power	P-02, P-03, PWR-07	Section 9.2	[ ]
-R-08A/B	Section 5.2 Control	PR-01 to PR-05, U-01	Section 9.2	[ ]
-R-09A	Section 5.5 UI	F-19, LED indication tests	Section 9.2	[ ]
+R-01	Section 5.4 Mechanical	M1-01, M2-01, M3-01, F-03 (Pico 2 Firmware Test Plan)	Section 9.2	[Met / Partially Met / Not Met]
+R-02	Section 5.2, 5.4	F-06 (multi-pill dose, Pico 2 Firmware Test Plan)	Section 9.2	[ ]
+R-03	Section 5.3 Sensing	P-02, P-03, I-02, I-03, F-03 (Pico 2 Firmware Test Plan)	Section 9.2	[ ]
+R-04	Section 5.2 Control	B-05, PR-05, E-02, E-04, K-02, K-04, INT-01, INT-02 (Pico 2 Firmware Test Plan); API-10, LCD-04, LCD-10, INT-03, INT-05, INT-07 (ESP32-S3 Firmware Test Plan)	Section 9.2	[ ]
+R-05	Section 5.1 Power	REQ-05-01	Section 9.2	[ ]
+R-06	Section 5.1 Power	REQ-06-01, F-23	Section 9.2	[ ]
+R-07	Section 5.1 Power	REQ-07-01	Section 9.2	[ ]
+R-08A/B	Section 5.2 Control	B-02, B-03, PR-01 to PR-05, U-01, M-04, E-01 (Pico 2 Firmware Test Plan); API-02, API-03, LCD-03, UB-03, UB-06, UB-07, SM-03, INT-02 (ESP32-S3 Firmware Test Plan)	Section 9.2	[ ]
+R-09A	Section 5.5 UI	F-19, LED indication tests, REQ-09A-01, REQ-09A-02	Section 9.2	[ ]
 R-09B	Section 5.5 UI	Audio alert test	Section 9.2	[ ]
-R-10	Section 5.2 Control	B-01, U-04	Section 9.2	[ ]
-R-12	Section 5.5 UI	F-05 to F-08, INT-02	Section 9.2	[ ]
-R-15	Section 5.2 Control	[NEED TEST ID]	Section 9.2	[ ]
-R-16	Section 5.4 Mechanical	TP-04 to TP-06, F-21, F-22	Section 9.2	[ ]
-R-17	Section 5.1 Power	PWR-09	Section 9.2	[ ]
-R-18	Section 5.2, 5.3	F-04, F-05, F-07, INT-06	Section 9.2	[ ]
-R-19	Section 5.1 Power	B-01, B-02, B-03	Section 9.2	[ ]
-R-21	Section 5.5 UI	F-19 (low-pill indication)	Section 9.2	[ ]
-R-22	Section 5.2, 5.5	F-07, dispense history buffer	Section 9.2	[ ]
-R-32	Section 5.3, 1.5.1	[NEED TEST ID, e.g. drawer/Hall pickup test]	Section 9.2	[ ]
-R-36	Section 5.4 Mechanical	[NEED TEST ID]	Section 9.2	[ ]
+R-10	Section 5.2 Control	U-04 (Pico 2 Firmware Test Plan)	Section 9.2	[ ]
+R-12	Section 5.5 UI	F-05 to F-08, INT-02, AP-02, AP-03, CP-01 to CP-06, API-01, NET-05 (ESP32-S3 Firmware Test Plan)	Section 9.2	[ ]
+R-15	Section 5.2 Control	REQ-15-01, API-03 (ESP32-S3 Firmware Test Plan)	Section 9.2	[ ]
+R-16	Section 5.4 Mechanical	REQ-16-01, REQ-16-02, REQ-16-03, REQ-16-04, REQ-16-05, F-21, F-22	Section 9.2	[ ]
+R-17	Section 5.1 Power	REQ-17-01	Section 9.2	[ ]
+R-18	Section 5.2, 5.3	F-01, F-02, F-04, F-05 (Pico 2 Firmware Test Plan); UB-10, LCD-07 (ESP32-S3 Firmware Test Plan)	Section 9.2	[ ]
+R-19	Section 5.1 Power	REQ-19-01	Section 9.2	[ ]
+R-20	Section 5.5 UI	API-02, API-12 (ESP32-S3 Firmware Test Plan)	Section 9.2	[ ]
+R-21	Section 5.5 UI	F-19 (low-pill indication), LCD-06, SM-08, NT-04, NT-05 (ESP32-S3 Firmware Test Plan)	Section 9.2	[ ]
+R-22	Section 5.2, 5.5	F-07 (Pico 2 Firmware Test Plan), dispense history buffer, SM-06, SM-07 (ESP32-S3 Firmware Test Plan)	Section 9.2	[ ]
+R-25	Section 5.5 UI	NT-01 (ESP32-S3 Firmware Test Plan)	Section 9.2	[ ]
+R-32	Section 5.3, 1.5.1	DR-02, DR-03, DR-04, UB-09, UB-14, INT-10 (ESP32-S3 Firmware Test Plan)	Section 9.2	[ ]
+R-33	Section 5.5.3	DR-06, NT-02, NT-03 (ESP32-S3 Firmware Test Plan)	Section 9.2	[ ]
+R-34	Section 5.5.4	AP-05, NET-01, NET-02, NET-04 (ESP32-S3 Firmware Test Plan)	Section 9.2	[ ]
+R-35	Section 5.5.4, 7.5.7	AP-06, API-13, NET-06, DIAG-01, DIAG-02 (ESP32-S3 Firmware Test Plan)	Section 9.2	[ ]
+R-36	Section 5.4 Mechanical	REQ-15-01	Section 9.2	[ ]
 
-[PLACEHOLDER: R-15, R-32 and R-36 are Must requirements with no assigned verification test yet, every Must requirement needs at least one before submission, or must be reprioritised out of Must. R-33, R-34, R-35, R-20, R-23 to R-25 are Should/Could and are recommended but not mandatory to add here for completeness.]
+[NOTE: every test ID in this table is pending, not yet executed, across all four revised plans integrated so far (Mechanical Enclosure, Power Board, ESP32-S3 Firmware, Pico 2 Firmware). Do not mark any row Met until real dated results exist. R-20, R-25, R-33, R-34 and R-35 are newly added rows, made possible by the ESP32-S3 plan's explicit per-test requirement tagging; they previously had no assigned test at all. R-01, R-03 and R-18 previously cited test IDs (F-14 to F-16, T-01, INT-06) that do not exist in any actual test plan document, likely leftover placeholders from before real test plans existed; these have been corrected against the real Pico 2 Firmware Test Plan. Only the Board Test Plan remains unrevised.]
 
 
 # 4. System Design
@@ -210,7 +215,7 @@ Table 4.3: Governing test documents
 1	Integrated Electronics and Power Board Validation and Subsystem Test Plan	Visual inspection, continuity, power rails, stepper drive, sensor conditioning, battery runtime, UPS switchover	7	Alan
 2	Mechanical Enclosure Validation and Subsystem Test Plan	Dimensional inspection, dovetail assembly, magnet retention, screen alignment, top assembly and container fit, drawer slide, panelling, board insertion	7	Blaise
 3	Raspberry Pi Pico 2 Firmware Validation and Subsystem Test Plan	Boot and initialisation, sensor interrupts, stepper control, profile persistence, dispense engine, UART command interface, software RTC, integration	8	Alan / Blaise
-4	ESP32-S3 Firmware Validation and Subsystem Test Plan	Build and flash, Wi-Fi access point, captive portal, JSON API, UART bridge, UI content, integration	7	Alan / Blaise
+4	ESP32-S3 Firmware Validation and Subsystem Test Plan (v2)	Build/flash/boot; Wi-Fi AP and mDNS; captive portal and HTTP API; LCD and buttons; UART bridge protocol; state management, persistence and edge cases; drawer/pickup confirmation; notifications; network reliability and multi-client; remote diagnostics; end-to-end integration with the RP2350	11	Alan / Blaise
 5	Functional Prototype Test Plan	First power-on, dashboard connectivity, sensor response, end-to-end dispense, physical use, power resilience, soak test; organised in two parts, Part A (cross-subsystem integration verification) and Part B (requirement validation)	7, in 2 parts	Alan / Blaise
 6	Week 12 Development Verification Record (supplementary, not a signed test plan)	Networking, notifications, controller communication, dispensing logic, LCD, dashboard, motor control, diagnostics	(none)	Alan / Blaise
 

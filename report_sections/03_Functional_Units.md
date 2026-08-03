@@ -48,11 +48,11 @@ Battery runtime analysis. Available energy is:
 E = 6600 mAh x 3.7 V = 24.42 Wh
 Runtime at a measured average idle power P_idle is t = 24.42 / P_idle hours. Because the UPS module boosts from cell voltage to 5 V at finite efficiency and the cells cannot be fully discharged, practical runtime is approximately 85 to 90% of this figure.
 [PLACEHOLDER: BATTERY RUNTIME: required to close R-19, currently unmeasured, and there is a conflict to resolve]
-Board Test Plan Phase 6 (B-01, B-02, B-03) is entirely empty. Complete it, multimeter in series between the UPS output and the board 5 V input:
-- B-01 both MCUs active, no motors: ____ mA
-- B-02 both MCUs active, one stepper running: ____ mA
-- B-03 full system, three steppers and all sensors: ____ mA
-Then compute runtime for each condition, apply the 85 to 90% derating, and state plainly whether R-19 is met.
+REQ-19-01 (Idle and Active Current Profiling), from the revised Integrated Electronics and Power Board Test Plan, is entirely empty. Complete it, multimeter in series between the UPS output and the board 5 V input:
+- MCU idle, no motors: ____ mA
+- One motor active: ____ mA
+- Full system active (three steppers and all sensors): ____ mA
+Then compute runtime for each condition (6600 mAh / measured idle mA x 0.85 efficiency, per the REQ-19-01 pass criterion), and state plainly whether R-19 is met.
 The conflict to address: both Capstone II assessments record idle current around 350 mA. At 350 mA on the 5 V rail (1.75 W), runtime is roughly 14 hours, far short of the original 48-hour target. The Capstone I estimate of 118 hours assumed approximately 207 mW, which the as-built three-motor system with an always-on backlit LCD does not achieve.
 Do not paper over this. Measure it, report it, analyse the gap in Section 8.9, identify the dominant consumers (LCD backlight and IR emitters are the prime suspects), and then either report R-19 as Not Met with that analysis, or define the idle condition precisely, for example backlight timed out, IR emitters gated, and report against that definition. A measured shortfall, correctly analysed with identified causes and a concrete remedy, scores well under IV2 and PA3. An unsupported claim of 48 hours does not, and is trivially challenged in Q&A.
 5.1.5 Engineering Tools
@@ -202,7 +202,7 @@ These carry ED3, Detailed Design, and CM2, Representation, for this subsystem:
 - Dovetail joint detail with tolerances
 - Drawer and slide interface with clearance dimensions
 Export clean images from SolidWorks; do not screenshot the CAD window with toolbars visible.
-[PLACEHOLDER: OVERALL ENVELOPE] State final assembled L x W x H, mass with and without batteries, and per-container pill capacity. These are portability claims (R-16) and should be quantified rather than asserted. Test DR-07 measures the envelope, complete it.
+[PLACEHOLDER: OVERALL ENVELOPE] State final assembled L x W x H, mass with and without batteries, and per-container pill capacity. These are portability claims (R-16) and should be quantified rather than asserted. Test REQ-16-04 measures the envelope, complete it.
 5.4.3 Engineering Principles
 Pill singulation. The dispensing mechanism releases a discrete, countable number of pills per actuation by geometry rather than by sensing. The dispensing feature is sized to admit one pill at a time, preventing simultaneous passage of multiple pills; the agitating element promotes continuous presentation of pills to the mechanism and prevents bridging or stalling at low fill levels, the condition under which gravity-fed mechanisms most commonly fail.
 Motor reaction torque constraint. Without a rigid mount, a small geared motor rotates its own body against the load rather than driving it, a common failure mode in low-torque geared applications. The motor mount is integrated into the printed structure and constrains the motor body in all rotational degrees of freedom while maintaining shaft alignment, ensuring torque is transmitted to the mechanism rather than absorbed by body drift.
@@ -235,14 +235,12 @@ Push-pull gauge	Magnet retention force and drawer slide force measurement
 Oscilloscope	Piezo transduction validation under real pill impact
 
 5.4.6 Test Requirements and Method
-Verified through the Mechanical Enclosure Test Plan, Phases 1 to 7: dimensional and visual inspection of every printed part, dovetail joint assembly, magnet pocket and retention verification, screen cutout alignment, top assembly and container fit, drawer slide and full assembly verification, panelling, and perfboard insertion. Results in Section 8.3.
-[INCOMPLETE TEST DATA: MUST BE RESOLVED BEFORE SUBMISSION]
-Substantial portions of the Mechanical Test Plan are unfilled, and several recorded results are not reportable as written:
-- Phase 1C (Drawer): D-01 to D-04 have no results. The drawer was redesigned twice since, re-inspect the final part.
-- Phase 3 (Magnets): MG-01 to MG-05 entirely unfilled, including MG-04 magnet retention force, which explicitly asks for a recorded numerical value. This is quantitative data you do not currently have and could obtain in ten minutes with the push-pull gauge.
-- Phase 6 (Drawer slide): DR-01 to DR-07 unfilled, including DR-02 clearance gap (feeler gauge, 0.2 to 0.6 mm spec) and DR-07 overall envelope. Both are numerical.
-- Ambiguous entries: V-03 recorded as "50/50"; J-02, J-03 and J-05 recorded as "X". Restate each as Pass, Fail or Partial with one sentence of explanation. "X" and "50/50" are not reportable results and read as carelessness.
-These are fast measurements that convert directly into IV2, Data Collection marks. Prioritise them.
+Verified through the Mechanical Enclosure Test Plan, revised and consolidated to eight tests across three groups, each mapped directly to the requirement it verifies.
+Base Station and Enclosure Integrity (R-16): REQ-16-01 (base dimensions and dovetail fit), REQ-16-02 (magnet retention pull-force), REQ-16-03 (panel and main board fit), REQ-16-04 (overall assembly envelope).
+Dispensing Compartments and Drawer (R-16, R-15, R-36): REQ-16-05 (drawer fit and travel), REQ-15-01 (container mount fit, also serving R-36).
+User Interface Mounting (R-09A): REQ-09A-01 (screen module integration), REQ-09A-02 (LED/button board fit).
+This revision replaced the earlier, longer phase-based plan (dimensional and visual inspection, dovetail joint assembly, magnet pocket verification, screen cutout alignment, top assembly and container fit, drawer slide and full assembly verification, panelling and perfboard insertion), trimming redundant manufacturing checks that did not independently verify a requirement. Results in Section 8.3.
+[TEST DATA STATUS] REQ-16-01 has a real recorded result: Partial/Fail, dated 14 July 2026 (the dovetail joint required sanding to assemble, and a 0.5 mm step on the joint faces prevented flush top/front alignment). The remaining seven tests (REQ-16-02 through REQ-16-05, REQ-15-01, REQ-09A-01, REQ-09A-02) are newly defined under the revised plan and have not yet been executed; none should be reported as Pass, Fail or Met until real measured results exist.
 
 5.5 User Interface Subsystem
 5.5.1 Definition
@@ -316,7 +314,7 @@ Access point mode (always available). The ESP32-S3 hosts its own Wi-Fi network. 
 Station mode (optional). The device can additionally join an existing Wi-Fi network. This enables outbound push notifications and allows the dashboard to be reached from anywhere on the household network. No core function depends on this mode.
 Parameter	Value
 Access point SSID	PortaPill
-Access point security	WPA2-PSK, confirmed active. ap_uses_password() requires the configured passphrase to be at least 8 characters before enabling WPA2; the deployed passphrase is 9 characters, so the WPA2 path is genuinely in effect rather than the open-network fallback.
+Access point security	WPA2-PSK, confirmed active. ap_uses_password() requires the configured passphrase to be at least 8 characters before enabling WPA2; the deployed default passphrase is well over that minimum, so the WPA2 path is genuinely in effect rather than the open-network fallback. The passphrase itself is not reproduced here; it is stored in a gitignored credentials header rather than tracked source, consistent with how the Wi-Fi and ntfy credentials are handled.
 Access point address	192.168.4.1
 Hostname (station mode)	portapill.local, re-announced on network join
 Operating mode	Simultaneous access point and station, both interfaces active concurrently
